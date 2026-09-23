@@ -1,0 +1,170 @@
+/**
+ * Guardrails for the public endpoints.
+ *
+ * The answer endpoint is by definition unauthenticated — the Proxmox installer
+ * has no credential to present — so anything an answer holds is readable by
+ * whoever can reach the URL while it is being served. These checks are what
+ * keep that window small and deliberate:
+ *
+ *   - serve_mode: off / armed (time- and count-boxed) / always
+ *   - per-answer IP or CIDR allowlist
+ *   - optional deployment-wide SERVE_TOKEN in the path or a header
+ *   - HTTPS required before any credential leaves the Worker
+ *   - per-IP rate limit
+ *
+ * Every denial is written to history so a probe is visible rather than silent.
+ */
+
+import type { Env } from "./env";
+import { bool, num } from "./env";
+import { timingSafeEqual } from "./crypto";
+import type { AnswerRecord } from "./answers";
+
+export interface Decision {
+  allowed: boolean;
+  reason: string;
+}
+
+const ALLOW: Decision = { allowed: true, reason: "" };
+
+function deny(reason: string): Decision {
+  return { allowed: false, reason };
+}
+
+/* ---------------------------- IP / CIDR ---------------------------- */
+
+function ipv4ToBig(ip: string): bigint | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  let out = 0n;
+  for (const p of parts) {
+    const n = Number(p);
+    if (!Number.isInteger(n) || n < 0 || n > 255 || !/^\d+$/.test(p)) return null;
+    out = (out << 8n) | BigInt(n);
+  }
+  return out;
+}
+
+function ipv6ToBig(ip: string): bigint | null {
+  let addr = ip.trim();
+  if (addr.includes(".")) {
+    // IPv4-mapped form, e.g. ::ffff:192.0.2.1
+    const idx = addr.lastIndexOf(":");
+    const v4 = ipv4ToBig(addr.slice(idx + 1));
+    if (v4 === null) return null;
+    const hi = (v4 >> 16n) & 0xffffn;
+    const lo = v4 & 0xffffn;
+    addr = `${addr.slice(0, idx + 1)}${hi.toString(16)}:${lo.toString(16)}`;
+  }
+  const halves = addr.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 1 ? head.length !== 8 : fill < 0) return null;
+  const groups = halves.length === 1 ? head : [...head, ...Array(fill).fill("0"), ...tail];
+  let out = 0n;
+  for (const g of groups) {
+    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
+    out = (out << 16n) | BigInt(parseInt(g, 16));
+  }
+  return out;
+}
+
+export function ipMatchesCidr(ip: string, rule: string): boolean {
+  const trimmed = rule.trim();
+  if (!trimmed) return false;
+  const isV6 = ip.includes(":");
+  const [net, bitsRaw] = trimmed.split("/");
+  const ruleIsV6 = net.includes(":");
+  if (isV6 !== ruleIsV6) return false;
+  const width = isV6 ? 128 : 32;
+  const bits = bitsRaw === undefined ? width : Number(bitsRaw);
+  if (!Number.isInteger(bits) || bits < 0 || bits > width) return false;
+  const a = isV6 ? ipv6ToBig(ip) : ipv4ToBig(ip);
+  const b = isV6 ? ipv6ToBig(net) : ipv4ToBig(net);
+  if (a === null || b === null) return false;
+  const mask = bits === 0 ? 0n : ((1n << BigInt(bits)) - 1n) << BigInt(width - bits);
+  return (a & mask) === (b & mask);
+}
+
+export function ipAllowed(ip: string, cidrs: string[]): boolean {
+  if (cidrs.length === 0) return true;
+  if (!ip) return false;
+  return cidrs.some((c) => ipMatchesCidr(ip, c));
+}
+
+/* ---------------------------- Serve token -------------------------- */
+
+/**
+ * When SERVE_TOKEN is set, the installer must present it either as a path
+ * segment (POST /answer/<token>) or as an X-AutoPVE-Token header. The path form
+ * exists because the Proxmox installer only lets you configure a URL.
+ */
+export function tokenOk(env: Env, request: Request, pathToken: string | null): boolean {
+  const expected = env.SERVE_TOKEN;
+  if (!expected) return true;
+  const header = request.headers.get("X-AutoPVE-Token");
+  if (header && timingSafeEqual(header, expected)) return true;
+  return !!pathToken && timingSafeEqual(pathToken, expected);
+}
+
+/* ---------------------------- Serve decision ----------------------- */
+
+export interface ServeContext {
+  request: Request;
+  ip: string;
+  pathToken: string | null;
+}
+
+export function canServe(env: Env, record: AnswerRecord, ctx: ServeContext): Decision {
+  const now = Date.now();
+  const url = new URL(ctx.request.url);
+  const secure = url.protocol === "https:" || url.hostname === "localhost" || url.hostname === "127.0.0.1";
+
+  if (!tokenOk(env, ctx.request, ctx.pathToken)) return deny("serve token missing or incorrect");
+  if (record.serve_mode === "off") return deny(`answer "${record.name}" is not being served (serve mode: off)`);
+  if (!ipAllowed(ctx.ip, record.allow_cidrs)) return deny(`client ${ctx.ip || "(unknown)"} is not in the allowlist for "${record.name}"`);
+
+  if (record.has_secrets) {
+    if (!record.secrets_ack) return deny(`answer "${record.name}" holds credentials that have not been acknowledged for hosting`);
+    if (bool(env.REQUIRE_HTTPS, true) && !secure) return deny("refusing to serve credentials over plain HTTP");
+    if (record.serve_mode === "always" && !bool(env.ALLOW_ALWAYS_SECRETS)) {
+      return deny(`answer "${record.name}" holds credentials and may not be served in "always" mode`);
+    }
+  }
+
+  if (record.serve_mode === "armed") {
+    // Checked before the window so an exhausted budget reports the real reason.
+    if (record.serves_remaining !== null && record.serves_remaining <= 0) {
+      return deny(`answer "${record.name}" has used up its allowed number of serves — re-arm it to serve again`);
+    }
+    if (!record.armed_until || record.armed_until < now) {
+      return deny(`answer "${record.name}" is disarmed — arm it in the configurator for the length of the install`);
+    }
+  }
+  return ALLOW;
+}
+
+/** Count a successful serve and disarm once the budget is gone. */
+export async function consumeServe(env: Env, record: AnswerRecord): Promise<void> {
+  if (record.serve_mode !== "armed") return;
+  if (record.serves_remaining === null) return;
+  const left = Math.max(0, record.serves_remaining - 1);
+  await env.DB.prepare("UPDATE answers SET serves_remaining = ?, armed_until = ? WHERE name = ?")
+    .bind(left, left === 0 ? null : record.armed_until, record.name)
+    .run();
+}
+
+export async function armAnswer(env: Env, name: string, minutes: number, serves: number | null): Promise<void> {
+  const until = Date.now() + Math.max(1, minutes) * 60_000;
+  await env.DB.prepare("UPDATE answers SET armed_until = ?, serves_remaining = ? WHERE name = ?").bind(until, serves, name).run();
+}
+
+export async function disarmAnswer(env: Env, name: string): Promise<void> {
+  await env.DB.prepare("UPDATE answers SET armed_until = NULL, serves_remaining = NULL WHERE name = ?").bind(name).run();
+}
+
+export function defaultArmMinutes(env: Env): number {
+  return num(env.ARM_DEFAULT_MINUTES, 30);
+}

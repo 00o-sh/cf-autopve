@@ -1,0 +1,122 @@
+/**
+ * Minimal TOML writer for Proxmox answer files.
+ *
+ * The upstream app ran tomlkit and then post-processed the output with a
+ * string hack to turn `"zfs.raid" = "raid1"` into `zfs.raid = "raid1"` and
+ * `["network.interface-name-pinning.mapping"]` into the unquoted form. We emit
+ * dotted keys correctly in the first place: each dot-separated segment is left
+ * bare when it is a valid TOML bare key and quoted otherwise (MAC addresses in
+ * the NIC pinning table contain colons, so those stay quoted).
+ */
+
+import { SECTION_ORDER, PRUNE_WHEN_EMPTY, isSecretKey, keyDef, type KeyType } from "./schema";
+
+export type TomlValue = string | number | boolean | Array<string | number | boolean>;
+export type AnswerDoc = Record<string, any>;
+
+const BARE_KEY = /^[A-Za-z0-9_-]+$/;
+
+export function encodeKey(key: string): string {
+  return key
+    .split(".")
+    .map((seg) => (BARE_KEY.test(seg) ? seg : quote(seg)))
+    .join(".");
+}
+
+function quote(s: string): string {
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t")}"`;
+}
+
+export function encodeValue(v: TomlValue): string {
+  if (Array.isArray(v)) return `[${v.map((x) => encodeValue(x as TomlValue)).join(", ")}]`;
+  if (typeof v === "number") return Number.isFinite(v) ? String(v) : quote(String(v));
+  if (typeof v === "boolean") return v ? "true" : "false";
+  return quote(String(v));
+}
+
+export interface EmitOptions {
+  /** Replace credential values with a placeholder instead of the real value. */
+  redact?: boolean;
+  redactionText?: string;
+  /** Prepend a provenance/warning comment block. */
+  header?: string;
+}
+
+/**
+ * Serialise an answer document to a Proxmox `answer.toml`.
+ * Non-section metadata (`must_contain`, `must_not_contain`, ...) is skipped.
+ */
+export function emitToml(doc: AnswerDoc, opts: EmitOptions = {}): string {
+  const redactionText = opts.redactionText ?? "REDACTED-BY-AUTOPVE";
+  const out: string[] = [];
+  if (opts.header) {
+    for (const line of opts.header.split("\n")) out.push(`# ${line}`);
+    out.push("");
+  }
+  for (const section of SECTION_ORDER) {
+    const table = doc[section];
+    if (!table || typeof table !== "object" || Array.isArray(table)) continue;
+    const entries = Object.entries(table as Record<string, TomlValue>);
+    if (entries.length === 0 && PRUNE_WHEN_EMPTY.includes(section)) continue;
+    out.push(`[${encodeKey(section)}]`);
+    for (const [key, value] of entries) {
+      if (value === undefined || value === null || value === "") continue;
+      const redacted = opts.redact && isSecretKey(section, key);
+      out.push(`${encodeKey(key)} = ${redacted ? quote(redactionText) : encodeValue(value)}`);
+    }
+    out.push("");
+  }
+  return out.join("\n").replace(/\n+$/, "\n");
+}
+
+/**
+ * Turn a UI string into a typed TOML value, using the catalogue's declared type
+ * when there is one and otherwise guessing the way the upstream app did
+ * (bracketed text becomes a list, digits become an integer).
+ */
+export function coerceValue(section: string, key: string, raw: unknown): TomlValue | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (Array.isArray(raw)) return raw.map((v) => (typeof v === "string" ? v.trim() : v)) as TomlValue;
+  if (typeof raw === "number" || typeof raw === "boolean") return raw;
+  const value = String(raw);
+  if (value.length === 0) return "";
+  const declared: KeyType | undefined = keyDef(section, key)?.type;
+  const looksList = value.trim().startsWith("[") && value.trim().endsWith("]");
+
+  if (declared === "list" || (!declared && looksList)) {
+    if (!looksList) return [value.trim()];
+    const inner = value.trim().slice(1, -1).trim();
+    if (inner === "") return [];
+    return inner
+      .split(",")
+      .map((v) => v.trim().replace(/^["']|["']$/g, ""))
+      .filter((v) => v.length > 0);
+  }
+  if (declared === "int") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : value;
+  }
+  if (declared === "bool") {
+    if (/^(true|yes|1)$/i.test(value.trim())) return true;
+    if (/^(false|no|0)$/i.test(value.trim())) return false;
+    return value;
+  }
+  if (declared === "str") return value;
+  // Untyped free-form key: mirror upstream's guessing, plus booleans.
+  if (/^(true|false)$/i.test(value.trim())) return value.trim().toLowerCase() === "true";
+  if (/^-?\d+$/.test(value.trim())) return Number(value.trim());
+  return value;
+}
+
+/** Redact credential lines in an already-rendered TOML string. */
+export function redactToml(toml: string, redactionText = "REDACTED-BY-AUTOPVE"): string {
+  return toml
+    .split("\n")
+    .map((line) => {
+      const m = line.match(/^\s*([A-Za-z0-9_."'-]+)\s*=/);
+      if (!m) return line;
+      const key = m[1].replace(/['"]/g, "");
+      return isSecretKey("global", key) ? `${m[1]} = "${redactionText}"` : line;
+    })
+    .join("\n");
+}

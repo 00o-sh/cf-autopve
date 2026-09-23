@@ -1,0 +1,200 @@
+/**
+ * cf-autopve — Proxmox VE automated-installation answer configurator, on Workers.
+ *
+ *   /                 configurator UI            (Cloudflare Access required)
+ *   /api/*            configurator API           (Cloudflare Access required)
+ *   POST /answer      installer answer endpoint  (unauthenticated by nature — see guards.ts)
+ *   POST /hook/<name> post-installation webhook -> outbound relay
+ *   GET  /files/<n>   first-boot scripts and other hosted files
+ *   GET  /healthz     liveness
+ */
+
+import type { Env } from "./env";
+import { clientIp, num } from "./env";
+import { AccessError, requireIdentity } from "./access";
+import { handleApi } from "./api";
+import { addHistory, rateLimited, recordSysinfoKeys, trimHistory } from "./db";
+import { decryptDoc, docHasSecrets, selectAnswer, systemName } from "./answers";
+import { canServe, consumeServe, tokenOk } from "./guards";
+import { serveFile } from "./files";
+import { deliver, getRelay } from "./relay";
+import { emitToml } from "./toml";
+
+const TEXT = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" };
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+
+    try {
+      if (path === "/healthz") return new Response("ok\n", { headers: TEXT });
+      if (path === "/answer" || path.startsWith("/answer/")) return await handleAnswer(request, env, ctx, path);
+      if (path.startsWith("/hook/")) return await handleHook(request, env, ctx, path);
+      if (path.startsWith("/files/")) return await handleFile(request, env, path);
+      if (path === "/api" || path.startsWith("/api/")) return await handleApi(request, env);
+      return await handleUi(request, env);
+    } catch (err) {
+      console.error("unhandled:", err);
+      return new Response("internal error\n", { status: 500, headers: TEXT });
+    }
+  },
+};
+
+/* ------------------------------------------------------------------ *
+ * Configurator UI (static assets, gated on Access)
+ * ------------------------------------------------------------------ */
+
+async function handleUi(request: Request, env: Env): Promise<Response> {
+  try {
+    await requireIdentity(request, env);
+  } catch (err) {
+    const status = err instanceof AccessError ? err.status : 500;
+    return new Response(
+      `${(err as Error).message}\n\nThe configurator is protected by Cloudflare Access. ` +
+        `The installer endpoints (/answer, /hook, /files) are unaffected.\n`,
+      { status, headers: TEXT },
+    );
+  }
+  const res = await env.ASSETS.fetch(request);
+  const headers = new Headers(res.headers);
+  headers.set("Cache-Control", "no-store");
+  headers.set("X-Frame-Options", "DENY");
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Referrer-Policy", "no-referrer");
+  headers.set(
+    "Content-Security-Policy",
+    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'",
+  );
+  return new Response(res.body, { status: res.status, headers });
+}
+
+/* ------------------------------------------------------------------ *
+ * POST /answer — what the Proxmox installer talks to
+ * ------------------------------------------------------------------ */
+
+async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, path: string): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response(
+      "This endpoint serves Proxmox answer files to the automated installer, which POSTs its system information here.\n",
+      { status: 405, headers: { ...TEXT, Allow: "POST" } },
+    );
+  }
+  const ip = clientIp(request);
+  const pathToken = path.startsWith("/answer/") ? path.slice("/answer/".length) : null;
+
+  if (await rateLimited(env, ip, "answer")) {
+    return new Response("rate limit exceeded\n", { status: 429, headers: TEXT });
+  }
+
+  const rawBody = (await request.text()).slice(0, num(env.HISTORY_MAX_BYTES, 131072) * 4);
+  let systemInfo: any = {};
+  try {
+    systemInfo = rawBody ? JSON.parse(rawBody) : {};
+  } catch {
+    systemInfo = {};
+  }
+  const systemInfoRaw = JSON.stringify(systemInfo);
+
+  const selection = await selectAnswer(env, systemInfoRaw);
+  if (!selection) {
+    return new Response("no answers are configured on this deployment\n", { status: 404, headers: TEXT });
+  }
+  const record = selection.record;
+  const decision = canServe(env, record, { request, ip, pathToken });
+
+  if (!decision.allowed) {
+    ctx.waitUntil(
+      (async () => {
+        await addHistory(env, {
+          ts: Date.now(), kind: "answer", answer: record.name, system_name: systemName(systemInfo),
+          ip, outcome: "denied", detail: decision.reason, response: "", system_info: systemInfoRaw,
+        });
+        await recordSysinfoKeys(env, systemInfoRaw);
+      })(),
+    );
+    return new Response(`refused: ${decision.reason}\n`, { status: 403, headers: TEXT });
+  }
+
+  const plain = await decryptDoc(selection.merged, env);
+  const toml = emitToml(plain);
+  const redacted = emitToml(selection.merged, { redact: true, redactionText: "REDACTED-BY-AUTOPVE" });
+
+  ctx.waitUntil(
+    (async () => {
+      const id = await addHistory(env, {
+        ts: Date.now(), kind: "answer", answer: record.name, system_name: systemName(systemInfo),
+        ip, outcome: "served",
+        detail: docHasSecrets(selection.merged) ? "served with credentials" : "",
+        response: redacted, system_info: systemInfoRaw,
+      });
+      await recordSysinfoKeys(env, systemInfoRaw);
+      await consumeServe(env, record);
+      if (id % 25 === 0) await trimHistory(env);
+    })(),
+  );
+
+  return new Response(toml, {
+    headers: { ...TEXT, "X-AutoPVE-Answer": record.name, "X-Robots-Tag": "noindex" },
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * POST /hook/<relay> — post-installation webhook relay
+ * ------------------------------------------------------------------ */
+
+async function handleHook(request: Request, env: Env, ctx: ExecutionContext, path: string): Promise<Response> {
+  if (request.method !== "POST") return new Response("POST only\n", { status: 405, headers: { ...TEXT, Allow: "POST" } });
+  const segments = path.slice("/hook/".length).split("/").filter(Boolean).map(decodeURIComponent);
+  const name = segments[0] ?? "";
+  const pathToken = segments[1] ?? null;
+  const ip = clientIp(request);
+
+  if (!tokenOk(env, request, pathToken)) return new Response("refused: serve token missing or incorrect\n", { status: 403, headers: TEXT });
+  if (await rateLimited(env, ip, "hook")) return new Response("rate limit exceeded\n", { status: 429, headers: TEXT });
+
+  const relay = await getRelay(env, name);
+  if (!relay || !relay.enabled) return new Response(`no enabled relay named "${name}"\n`, { status: 404, headers: TEXT });
+
+  const rawBody = (await request.text()).slice(0, 512 * 1024);
+  let payload: any = {};
+  try {
+    payload = rawBody ? JSON.parse(rawBody) : {};
+  } catch {
+    payload = {};
+  }
+  const infoRaw = JSON.stringify(payload);
+
+  const id = await addHistory(env, {
+    ts: Date.now(), kind: "hook", answer: null, system_name: systemName(payload), ip,
+    outcome: "relayed", detail: `-> ${relay.name}`, response: "", system_info: infoRaw,
+  });
+  ctx.waitUntil(
+    (async () => {
+      await recordSysinfoKeys(env, infoRaw);
+      const result = await deliver(env, relay, payload, rawBody, id);
+      await env.DB.prepare("UPDATE history SET outcome = ?, detail = ? WHERE id = ?")
+        .bind(result.ok ? "relayed" : "error", result.ok ? `-> ${relay.name} (HTTP ${result.status})` : `-> ${relay.name} failed: ${result.error}`, id)
+        .run();
+    })(),
+  );
+
+  // The installer only needs to know we took the payload; delivery is async.
+  return new Response("accepted\n", { status: 202, headers: TEXT });
+}
+
+/* ------------------------------------------------------------------ *
+ * GET /files/<name>
+ * ------------------------------------------------------------------ */
+
+async function handleFile(request: Request, env: Env, path: string): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("GET only\n", { status: 405, headers: { ...TEXT, Allow: "GET" } });
+  }
+  const url = new URL(request.url);
+  const queryToken = url.searchParams.get("t");
+  const name = decodeURIComponent(path.slice("/files/".length));
+  if (!tokenOk(env, request, queryToken)) return new Response("refused: serve token missing or incorrect\n", { status: 403, headers: TEXT });
+  if (await rateLimited(env, clientIp(request), "files")) return new Response("rate limit exceeded\n", { status: 429, headers: TEXT });
+  return serveFile(env, name);
+}

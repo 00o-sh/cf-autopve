@@ -1,0 +1,3 @@
+# Local development only — copy to .dev.vars (gitignored). Production uses `wrangler secret put`.
+DEV_ALLOW_INSECURE_UI = "true"
+ANSWER_ENC_KEY = "Zm9yLWxvY2FsLWRldi1vbmx5LTMyLWJ5dGUta2V5ISE="

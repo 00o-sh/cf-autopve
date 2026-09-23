@@ -1,0 +1,21 @@
+{
+  "name": "cf-autopve",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Proxmox VE automated-installation answer file configurator on Cloudflare Workers",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/logic.test.js",
+    "db:init:local": "wrangler d1 migrations apply autopve --local",
+    "db:init": "wrangler d1 migrations apply autopve --remote",
+    "pretest": "esbuild test/_bundle.ts --bundle --format=esm --platform=neutral --outfile=.test-build/bundle.mjs --log-level=warning"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260923.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.136.3"
+  }
+}

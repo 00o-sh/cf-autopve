@@ -1,0 +1,49 @@
+name = "autopve"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+workers_dev = false
+
+# The configurator UI. The Worker runs first so it can verify the Cloudflare
+# Access JWT itself (defence in depth) before handing the request to the assets.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "autopve"
+database_id = "00000000-0000-0000-0000-000000000000" # replace with your real D1 id: wrangler d1 create autopve
+
+# Optional: first-boot files larger than FILE_MAX_BYTES need R2.
+# Uncomment after `wrangler r2 bucket create autopve-files`.
+# [[r2_buckets]]
+# binding = "FILES"
+# bucket_name = "autopve-files"
+
+
+[vars]
+# --- Cloudflare Access (protects the configurator UI + /api) ---
+ACCESS_TEAM_DOMAIN = "https://YOURTEAM.cloudflareaccess.com"
+ACCESS_AUD = "REPLACE_WITH_ACCESS_APPLICATION_AUD_TAG"
+
+# --- Secret-hosting guardrails (see README "Hosting secrets") ---
+# Default arm window, in minutes, used by the "Arm" button.
+ARM_DEFAULT_MINUTES = "30"
+# Refuse to ever serve an answer containing plaintext secrets over plain HTTP.
+REQUIRE_HTTPS = "true"
+# Allow serve_mode = "always" on answers that contain secrets. Keep "false".
+ALLOW_ALWAYS_SECRETS = "false"
+# Requests per minute per client IP against /answer and /hook.
+RATE_LIMIT_PER_MIN = "30"
+# Max size of a file hosted in D1 (bytes). Above this you need the R2 binding.
+FILE_MAX_BYTES = "1000000"
+# Max stored system_info blob per history row (bytes).
+HISTORY_MAX_BYTES = "131072"
+# History rows to keep (older rows are trimmed on write).
+HISTORY_LIMIT = "1000"
+
+# Secrets (set with `wrangler secret put <NAME>`), never in this file:
+#   ANSWER_ENC_KEY  - base64 32-byte AES-256-GCM key. REQUIRED to store any secret value.
+#   SERVE_TOKEN     - optional shared token; when set, /answer and /hook require
+#                     /answer/<token> in the path or an X-AutoPVE-Token header.
