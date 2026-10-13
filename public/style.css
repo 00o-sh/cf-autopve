@@ -105,6 +105,9 @@ label.field > span { display: block; font-size: 12px; color: var(--muted); margi
 .keyrow .vwrap { display: flex; gap: 4px; }
 .vwrap.invalid input, .vwrap.invalid .combo-btn { border-color: var(--bad); }
 .fielderr { color: #ff98a0; font-size: 12px; }
+input.comment { font-size: 12px; color: var(--muted); background: transparent; border-style: dashed; padding: 3px 8px; }
+input.comment:focus { color: var(--text); border-style: solid; }
+.keyrow .help.on { color: var(--accent); border-color: var(--accent-dim); }
 .fielderr:empty { display: none; }
 .helptext { font-size: 12px; color: var(--muted); background: var(--panel-2); border-left: 2px solid var(--accent); padding: 6px 8px; border-radius: 0 4px 4px 0; }
 
