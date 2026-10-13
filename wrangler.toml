@@ -2,6 +2,7 @@ name = "autopve"
 main = "src/index.ts"
 compatibility_date = "2026-09-01"
 workers_dev = false
+routes = [{ pattern = "autopve.00o.sh", custom_domain = true }]
 
 # The configurator UI. The Worker runs first so it can verify the Cloudflare
 # Access JWT itself (defence in depth) before handing the request to the assets.
@@ -24,8 +25,8 @@ database_id = "483d7b40-0907-41c2-a84c-fd567e84f0aa"
 
 [vars]
 # --- Cloudflare Access (protects the configurator UI + /api) ---
-ACCESS_TEAM_DOMAIN = "https://YOURTEAM.cloudflareaccess.com"
-ACCESS_AUD = "REPLACE_WITH_ACCESS_APPLICATION_AUD_TAG"
+ACCESS_TEAM_DOMAIN = "https://bitbybit.cloudflareaccess.com"
+ACCESS_AUD = "4776f236d2afb19f574a9cb8e384d5735d0baa6d5d9da3d083ca2962e8895112"
 
 # --- Secret-hosting guardrails (see README "Hosting secrets") ---
 # Default arm window, in minutes, used by the "Arm" button.
