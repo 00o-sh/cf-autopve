@@ -145,13 +145,24 @@ the installer POSTs, and no *must not contain* string does. First match by `prio
 no match falls back to `Default`. The Filters tab has a dry-run box — paste a `system_info` payload from
 History and see which answer would win and whether it would actually be served.
 
-Point the installer at:
+Point the installer at it by building an ISO with `scripts/build-iso.sh`. It downloads the PVE release
+(newest by default) from Proxmox, checks it against their `SHA256SUMS`, and runs
+`proxmox-auto-install-assistant prepare-iso` with your answer URL. When the assistant and `xorriso`
+aren't installed (any non-Debian jumpbox), it runs them in a throwaway `debian` container via docker or
+podman instead:
+
+```bash
+scripts/build-iso.sh --url https://autopve.example.com              # prompts for SERVE_TOKEN, hidden
+scripts/build-iso.sh --url https://autopve.example.com --version 9.2-1 --out /srv/iso
+AUTOPVE_TOKEN=… scripts/build-iso.sh --url … --first-boot dns.sh    # bake a first-boot script in
+```
+
+One ISO serves every node; rebuild only for a new PVE release or a new token. The token ends up inside
+the ISO, so treat the ISO as a secret. The equivalent manual command is:
 
 ```bash
 proxmox-auto-install-assistant prepare-iso pve.iso \
-  --fetch-from http --url https://autopve.example.com/answer
-# with a SERVE_TOKEN configured:
-#   --url https://autopve.example.com/answer/<SERVE_TOKEN>
+  --fetch-from http --url https://autopve.example.com/answer/<SERVE_TOKEN>
 ```
 
 ### Post-installation webhook relay

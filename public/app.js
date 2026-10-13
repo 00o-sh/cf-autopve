@@ -558,7 +558,7 @@ function renderServing() {
     el("h3", { text: "Installer endpoints" }),
     el("p", { class: "muted", text: "Point the installer's answer fetch at this URL" + (c.serve_token_configured ? ", replacing <SERVE_TOKEN> with your token's value." : ".") }),
     el("div", { class: "url", text: answerUrl }),
-    el("p", { class: "muted", style: "margin-bottom:4px", text: "Build a matching ISO with:" }),
+    el("p", { class: "muted", style: "margin-bottom:4px", text: "Build a matching ISO with scripts/build-iso.sh from the repo (downloads and verifies the PVE release, works on any jumpbox with docker or podman), or by hand:" }),
     el("div", { class: "url", text: `proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http --url "${answerUrl}"` }),
     el("p", { class: "muted", text:
       "This one URL serves every answer. The installer posts its hardware details; the first answer (by match priority) " +
