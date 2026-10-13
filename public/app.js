@@ -553,13 +553,16 @@ function renderServing() {
     el("label", { class: "field" }, [el("span", { text: "Notes" }), notes]),
   ]));
 
-  const base = c.origin;
+  const answerUrl = `${c.origin}/answer` + (c.serve_token_configured ? "/<SERVE_TOKEN>" : "");
   wrap.append(el("div", { class: "card" }, [
     el("h3", { text: "Installer endpoints" }),
-    el("p", { class: "muted", text: "Point the installer's answer fetch at this URL" + (c.serve_token_configured ? ", appending your SERVE_TOKEN as the last path segment." : ".") }),
-    el("div", { class: "url", text: `${base}/answer` + (c.serve_token_configured ? "/<SERVE_TOKEN>" : "") }),
+    el("p", { class: "muted", text: "Point the installer's answer fetch at this URL" + (c.serve_token_configured ? ", replacing <SERVE_TOKEN> with your token's value." : ".") }),
+    el("div", { class: "url", text: answerUrl }),
     el("p", { class: "muted", style: "margin-bottom:4px", text: "Build a matching ISO with:" }),
-    el("div", { class: "url", text: `proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http --url ${base}/answer` }),
+    el("div", { class: "url", text: `proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http --url "${answerUrl}"` }),
+    el("p", { class: "muted", text:
+      "This one URL serves every answer. The installer posts its hardware details; the first answer (by match priority) " +
+      "whose Filters match is returned, layered over Default. If none match, Default is served." }),
   ]));
   return wrap;
 }
