@@ -20,6 +20,7 @@ OUT_DIR="./iso"
 RUNNER="auto"
 FIRST_BOOT=""
 NO_TOKEN=0
+SAFE_COPY=auto
 
 die() { echo "build-iso: $*" >&2; exit 1; }
 say() { echo "==> $*" >&2; }
@@ -35,6 +36,8 @@ Usage: build-iso.sh [options]
   --first-boot FILE  bake a first-boot executable into the ISO (answer: first-boot.source = "from-iso")
   --no-token         the deployment has no SERVE_TOKEN
   --runner MODE      auto | native | docker | podman (default: auto)
+  --safe-copy        copy the ISO with plain reads/writes (needs strace); on by default under WSL,
+                     where the tool's in-kernel copy can fail with "Cannot allocate memory"
   -h, --help
 
 The serve token is read from AUTOPVE_TOKEN, or prompted for (input hidden) so it
@@ -51,6 +54,7 @@ while [ $# -gt 0 ]; do
     --first-boot) FIRST_BOOT="${2:?}"; shift 2 ;;
     --no-token) NO_TOKEN=1; shift ;;
     --runner) RUNNER="${2:?}"; shift 2 ;;
+    --safe-copy) SAFE_COPY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown option: $1" ;;
   esac
@@ -139,6 +143,24 @@ if [ "$RUNNER" = auto ]; then
   fi
 fi
 
+# prepare-iso copies the ISO with copy_file_range in 1 GiB chunks and treats
+# ENOMEM as fatal. WSL2 kernels return ENOMEM there under memory pressure, so
+# there we make copy_file_range and sendfile report ENOSYS: the tool then falls
+# back to plain reads and writes. The result is the same ISO.
+if [ "$SAFE_COPY" = auto ]; then
+  if grep -qiE 'microsoft|wsl' /proc/sys/kernel/osrelease 2>/dev/null; then SAFE_COPY=1; else SAFE_COPY=0; fi
+fi
+COPY_WRAP=()
+if [ "$SAFE_COPY" = 1 ]; then
+  COPY_WRAP=(strace -f -qq -o /dev/null -e "trace=copy_file_range,sendfile"
+             -e inject=copy_file_range:error=ENOSYS -e inject=sendfile:error=ENOSYS)
+  if [ "$RUNNER" = native ]; then
+    command -v strace >/dev/null || die "safe copy (on by default under WSL) needs strace: sudo apt install strace"
+  fi
+  say "safe copy on: avoiding in-kernel file copies"
+fi
+export AUTOPVE_SAFE_COPY="$SAFE_COPY"
+
 # The answer URL travels as an environment variable so the token is not visible
 # in the process list; the container gets it by name only.
 export AUTOPVE_ANSWER_URL="$ANSWER_URL"
@@ -149,7 +171,7 @@ say "building with $RUNNER: answer URL $SHOWN_URL"
 case "$RUNNER" in
   native)
     [ -z "$FIRST_BOOT" ] || FB_ARGS=(--on-first-boot "$FIRST_BOOT")
-    proxmox-auto-install-assistant prepare-iso "$ISO" --fetch-from http \
+    ${COPY_WRAP[@]+"${COPY_WRAP[@]}"} proxmox-auto-install-assistant prepare-iso "$ISO" --fetch-from http \
       --url "$AUTOPVE_ANSWER_URL" --output "$OUTPUT" ${FB_ARGS[@]+"${FB_ARGS[@]}"}
     ;;
   docker|podman)
@@ -159,17 +181,20 @@ case "$RUNNER" in
       FB_ARGS=(--on-first-boot /first-boot)
     fi
     # shellcheck disable=SC2016  # expands inside the container, not here
-    "$RUNNER" run --rm -e AUTOPVE_ANSWER_URL "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euc '
+    "$RUNNER" run --rm -e AUTOPVE_ANSWER_URL -e AUTOPVE_SAFE_COPY "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euc '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq >/dev/null
-      apt-get install -y -qq --no-install-recommends ca-certificates curl xorriso >/dev/null
+      apt-get install -y -qq --no-install-recommends ca-certificates curl xorriso strace >/dev/null
       curl -fsSL "$1" -o /usr/share/keyrings/proxmox.gpg
       echo "deb [signed-by=/usr/share/keyrings/proxmox.gpg] http://download.proxmox.com/debian/pve $2 pve-no-subscription" \
         > /etc/apt/sources.list.d/pve.list
       apt-get update -qq >/dev/null
       apt-get install -y -qq --no-install-recommends proxmox-auto-install-assistant >/dev/null
       src="$0" out="$3"; shift 3
-      proxmox-auto-install-assistant prepare-iso "/src/$src" --fetch-from http \
+      wrap=()
+      [ "$AUTOPVE_SAFE_COPY" != 1 ] || wrap=(strace -f -qq -o /dev/null -e trace=copy_file_range,sendfile \
+        -e inject=copy_file_range:error=ENOSYS -e inject=sendfile:error=ENOSYS)
+      ${wrap[@]+"${wrap[@]}"} proxmox-auto-install-assistant prepare-iso "/src/$src" --fetch-from http \
         --url "$AUTOPVE_ANSWER_URL" --output "/out/$out" --tmp /out "$@"
     ' "$NAME" "$KEY_URL" "$SUITE" "$(basename "$OUTPUT")" ${FB_ARGS[@]+"${FB_ARGS[@]}"}
     ;;
