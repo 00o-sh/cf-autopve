@@ -5,3 +5,4 @@ export { renderTemplate, validateRelayUrl } from "../src/relay";
 export { encryptString, decryptString, hmacSha256Hex, timingSafeEqual } from "../src/crypto";
 export { scanForSecrets } from "../src/files";
 export { isSecretKey } from "../src/schema";
+export { checkValue, FORMATS } from "../src/validate";

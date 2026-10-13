@@ -222,3 +222,54 @@ test("signatures are stable and token comparison is length-safe", async () => {
   assert.equal(A.timingSafeEqual("abc", "abc"), true);
   assert.equal(A.timingSafeEqual("abc", "abcd"), false);
 });
+
+/* ----------------------------- validation ---------------------------- */
+
+test("enumerated global keys accept only known values", () => {
+  assert.equal(A.checkValue("global", "keyboard", "en-us"), null);
+  assert.match(A.checkValue("global", "keyboard", "en_US"), /not a recognised value/);
+  assert.match(A.checkValue("disk-setup", "filesystem", "ntfs"), /must be one of ext4, xfs, zfs, btrfs/);
+  assert.equal(A.checkValue("global", "country", "us"), null);
+  assert.match(A.checkValue("global", "country", "usa"), /not a recognised value/);
+  assert.equal(A.checkValue("global", "timezone", "Europe/Vienna"), null);
+  assert.equal(A.checkValue("global", "timezone", "America/New_York"), null);
+  assert.equal(A.checkValue("global", "timezone", "UTC"), null);
+  assert.match(A.checkValue("global", "timezone", "Europe/Atlantis"), /not a recognised value/);
+});
+
+test("formatted keys are checked against their pattern", () => {
+  assert.equal(A.checkValue("global", "fqdn", "servervirtual2.yeled.org"), null);
+  assert.match(A.checkValue("global", "fqdn", "servervirtual2"), /fully qualified/);
+  assert.match(A.checkValue("global", "fqdn", "bad_host.example.com"), /fully qualified/);
+  assert.equal(A.checkValue("global", "mailto", "ebrody@yeled.org"), null);
+  assert.match(A.checkValue("global", "mailto", "not an email"), /email/);
+  assert.equal(A.checkValue("network", "cidr", "192.168.1.10/24"), null);
+  assert.equal(A.checkValue("network", "cidr", "2001:db8::10/64"), null);
+  assert.match(A.checkValue("network", "cidr", "192.168.1.10"), /prefix length/);
+  assert.match(A.checkValue("network", "cidr", "192.168.1.300/24"), /prefix length/);
+  assert.equal(A.checkValue("network", "gateway", "fe80::1"), null);
+  assert.match(A.checkValue("network", "dns", "1.1.1"), /IPv4 or IPv6/);
+  const fp = Array(32).fill("ab").join(":");
+  assert.equal(A.checkValue("post-installation-webhook", "cert-fingerprint", fp), null);
+  assert.match(A.checkValue("post-installation-webhook", "cert-fingerprint", "abcd"), /fingerprint/);
+});
+
+test("typed keys and uncatalogued keys", () => {
+  assert.equal(A.checkValue("disk-setup", "zfs.ashift", 12), null);
+  assert.match(A.checkValue("disk-setup", "zfs.ashift", "twelve"), /non-negative number/);
+  assert.match(A.checkValue("global", "reboot-on-error", "maybe"), /true or false/);
+  assert.equal(A.checkValue("global", "my-own-key", "anything"), null);
+});
+
+test("the UI regex sources compile and agree with the server", () => {
+  for (const [name, f] of Object.entries(A.FORMATS)) assert.doesNotThrow(() => new RegExp(f.pattern), name);
+  assert.ok(new RegExp(A.FORMATS.fqdn.pattern).test("pve1.example.com"));
+});
+
+test("normalisation refuses invalid values and names every problem", () => {
+  assert.throws(
+    () => A.normaliseDoc({ global: { timezone: "Mars/Olympus", country: "zz", fqdn: "pve.example.com" } }),
+    (err) => /global\.timezone/.test(err.message) && /global\.country/.test(err.message) && !/global\.fqdn/.test(err.message),
+  );
+  assert.doesNotThrow(() => A.normaliseDoc({ global: { keyboard: "en-us", country: "us", timezone: "America/New_York" } }));
+});

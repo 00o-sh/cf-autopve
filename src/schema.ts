@@ -7,11 +7,19 @@
  * upstream app lets you type a unique key and so does this one.
  */
 
+import { COUNTRIES, TIMEZONES } from "./geo";
+import type { Format } from "./validate";
+
 export type KeyType = "str" | "int" | "bool" | "list";
 
 export interface KeyDef {
   description: string;
+  /** The complete set of accepted values; the UI offers them as a searchable dropdown. */
   options?: string[];
+  /** Display names for options, shown next to the value in the dropdown. */
+  labels?: Record<string, string>;
+  /** Shape the value must have (see validate.ts). */
+  format?: Format;
   type?: KeyType;
   /** Value is a credential: encrypted at rest, redacted everywhere, gated on serve. */
   secret?: boolean;
@@ -38,17 +46,31 @@ const GLOBAL: Record<string, KeyDef> = {
       "fr-ch", "hu", "is", "it", "jp", "lt", "mk", "nl", "no", "pl", "pt",
       "pt-br", "se", "si", "tr",
     ],
+    labels: {
+      de: "German", "de-ch": "Swiss-German", dk: "Danish", "en-gb": "United Kingdom", "en-us": "U.S. English",
+      es: "Spanish", fi: "Finnish", fr: "French", "fr-be": "Belgium-French", "fr-ca": "Canada-French",
+      "fr-ch": "Swiss-French", hu: "Hungarian", is: "Icelandic", it: "Italian", jp: "Japanese", lt: "Lithuanian",
+      mk: "Macedonian", nl: "Dutch", no: "Norwegian", pl: "Polish", pt: "Portuguese", "pt-br": "Brazil-Portuguese",
+      se: "Swedish", si: "Slovenian", tr: "Turkish",
+    },
   },
-  country: { description: "The country code in the two letter variant. For example, at, us or fr." },
-  fqdn: { description: "The fully qualified domain name of the host. The domain part will be used as the search domain." },
+  country: {
+    description: "The country code in the two letter variant. For example, at, us or fr.",
+    options: Object.keys(COUNTRIES),
+    labels: COUNTRIES,
+  },
+  fqdn: {
+    description: "The fully qualified domain name of the host. The domain part will be used as the search domain.",
+    format: "fqdn",
+  },
   "fqdn.source": {
     description:
       "Must be set to 'from-dhcp'. Retrieves the host name (option 12) and, if available, domain name (option 15) from the DHCP lease configuration. In this mode, the DHCP server must provide a host name, otherwise the installation will fail.",
     options: ["from-dhcp"],
   },
-  "fqdn.domain": { description: "Fallback (search) domain name to use if the DHCP server does not provide one." },
-  mailto: { description: "The default email address for the user root." },
-  timezone: { description: "The timezone in tzdata format. For example, Europe/Vienna or America/New_York." },
+  "fqdn.domain": { description: "Fallback (search) domain name to use if the DHCP server does not provide one.", format: "domain" },
+  mailto: { description: "The default email address for the user root.", format: "email" },
+  timezone: { description: "The timezone in tzdata format. For example, Europe/Vienna or America/New_York.", options: TIMEZONES },
   "root-password": {
     description:
       "The password for the root user. Stored encrypted; hosting it means anything that can reach the answer endpoint can read it. Prefer root-password-hashed.",
@@ -84,9 +106,9 @@ const NETWORK: Record<string, KeyDef> = {
     description: "Where to source the static network configuration from. This can be from-dhcp or from-answer.",
     options: ["from-dhcp", "from-answer"],
   },
-  cidr: { description: "The IP address in CIDR notation. For example, 192.168.1.10/24." },
-  dns: { description: "The IP address of the DNS server." },
-  gateway: { description: "The IP address of the default gateway." },
+  cidr: { description: "The IP address in CIDR notation. For example, 192.168.1.10/24.", format: "cidr" },
+  dns: { description: "The IP address of the DNS server.", format: "ip" },
+  gateway: { description: "The IP address of the default gateway.", format: "ip" },
   "filter.ID_NET_NAME_MAC": { description: "Filter against the ID_NET_NAME_MAC property to select the network card. See filters." },
 };
 
@@ -164,8 +186,9 @@ const POST_INSTALL: Record<string, KeyDef> = {
   url: {
     description:
       "The URL the information about the installed system should be sent to as HTTP POST request. Point this at this Worker's /hook/<relay> endpoint to fan the payload out to your automation.",
+    format: "url",
   },
-  "cert-fingerprint": { description: "Optional. SHA256 certificate fingerprint if certificate pinning should be used." },
+  "cert-fingerprint": { description: "Optional. SHA256 certificate fingerprint if certificate pinning should be used.", format: "fingerprint" },
 };
 
 const FIRST_BOOT: Record<string, KeyDef> = {
@@ -177,9 +200,10 @@ const FIRST_BOOT: Record<string, KeyDef> = {
     description: "Optional. At what stage of the boot to run the hook. It can be one of before-network, network-online or fully-up.",
     options: ["before-network", "network-online", "fully-up"],
   },
-  url: { description: 'Required when source = "from-url". The URL of the executable file to download.' },
+  url: { description: 'Required when source = "from-url". The URL of the executable file to download.', format: "url" },
   "cert-fingerprint": {
     description: "Optional. SHA256 certificate fingerprint if certificate pinning should be used for the download of the executable file.",
+    format: "fingerprint",
   },
 };
 

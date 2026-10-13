@@ -12,6 +12,7 @@ import { bool } from "./env";
 import { encryptString, decryptString, isEncrypted } from "./crypto";
 import { isSecretKey, SECTION_ORDER, DEFAULT_ANSWER_DOC } from "./schema";
 import { coerceValue, type AnswerDoc } from "./toml";
+import { checkValue } from "./validate";
 
 export const DEFAULT_NAME = "Default";
 
@@ -192,6 +193,7 @@ export function validateName(name: string): string {
 /** Normalise a document coming from the UI: coerce types, drop empties. */
 export function normaliseDoc(input: AnswerDoc): AnswerDoc {
   const out: AnswerDoc = {};
+  const invalid: string[] = [];
   for (const section of SECTION_ORDER) {
     const table = input[section];
     if (!table || typeof table !== "object" || Array.isArray(table)) continue;
@@ -204,10 +206,15 @@ export function normaliseDoc(input: AnswerDoc): AnswerDoc {
       }
       const v = coerceValue(section, key, raw);
       if (v === undefined || v === "") continue;
+      if (raw !== MASK_MARKER) {
+        const problem = checkValue(section, key, v);
+        if (problem) invalid.push(`${section}.${key} ${problem} (got "${String(raw)}")`);
+      }
       clean[key] = v;
     }
     out[section] = clean;
   }
+  if (invalid.length) throw new ValidationError(`Not saved: ${invalid.join("; ")}.`);
   // Filters are answer metadata, not part of the TOML.
   out.must_contain = Array.isArray(input.must_contain) ? input.must_contain.filter((s: unknown) => typeof s === "string" && s.trim() !== "") : [];
   out.must_not_contain = Array.isArray(input.must_not_contain)
