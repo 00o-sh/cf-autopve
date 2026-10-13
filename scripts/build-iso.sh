@@ -147,6 +147,10 @@ fi
 # ENOMEM as fatal. WSL2 kernels return ENOMEM there under memory pressure, so
 # there we make copy_file_range and sendfile report ENOSYS: the tool then falls
 # back to plain reads and writes. The result is the same ISO.
+# On arm64, strace cannot skip a syscall outright (it prints "arch_set_scno ...
+# Invalid argument"): the call still runs and only its result is replaced. That
+# is still safe, because both calls use the file positions and the fallback
+# carries on from wherever the kernel copy stopped. The warnings are dropped.
 if [ "$SAFE_COPY" = auto ]; then
   if grep -qiE 'microsoft|wsl' /proc/sys/kernel/osrelease 2>/dev/null; then SAFE_COPY=1; else SAFE_COPY=0; fi
 fi
@@ -172,7 +176,8 @@ case "$RUNNER" in
   native)
     [ -z "$FIRST_BOOT" ] || FB_ARGS=(--on-first-boot "$FIRST_BOOT")
     ${COPY_WRAP[@]+"${COPY_WRAP[@]}"} proxmox-auto-install-assistant prepare-iso "$ISO" --fetch-from http \
-      --url "$AUTOPVE_ANSWER_URL" --output "$OUTPUT" ${FB_ARGS[@]+"${FB_ARGS[@]}"}
+      --url "$AUTOPVE_ANSWER_URL" --output "$OUTPUT" ${FB_ARGS[@]+"${FB_ARGS[@]}"} \
+      2>&1 | { grep -v --line-buffered 'arch_set_scno' || true; }
     ;;
   docker|podman)
     MOUNTS=(-v "$ISO_DIR:/src:ro" -v "$OUT_DIR:/out")
@@ -181,7 +186,7 @@ case "$RUNNER" in
       FB_ARGS=(--on-first-boot /first-boot)
     fi
     # shellcheck disable=SC2016  # expands inside the container, not here
-    "$RUNNER" run --rm -e AUTOPVE_ANSWER_URL -e AUTOPVE_SAFE_COPY "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euc '
+    "$RUNNER" run --rm -e AUTOPVE_ANSWER_URL -e AUTOPVE_SAFE_COPY "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq >/dev/null
       apt-get install -y -qq --no-install-recommends ca-certificates curl xorriso strace >/dev/null
@@ -195,7 +200,8 @@ case "$RUNNER" in
       [ "$AUTOPVE_SAFE_COPY" != 1 ] || wrap=(strace -f -qq -o /dev/null -e trace=copy_file_range,sendfile \
         -e inject=copy_file_range:error=ENOSYS -e inject=sendfile:error=ENOSYS)
       ${wrap[@]+"${wrap[@]}"} proxmox-auto-install-assistant prepare-iso "/src/$src" --fetch-from http \
-        --url "$AUTOPVE_ANSWER_URL" --output "/out/$out" --tmp /out "$@"
+        --url "$AUTOPVE_ANSWER_URL" --output "/out/$out" --tmp /out "$@" \
+        2>&1 | { grep -v --line-buffered arch_set_scno || true; }
     ' "$NAME" "$KEY_URL" "$SUITE" "$(basename "$OUTPUT")" ${FB_ARGS[@]+"${FB_ARGS[@]}"}
     ;;
   *) die "unknown runner: $RUNNER" ;;
