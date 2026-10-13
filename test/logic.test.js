@@ -273,3 +273,45 @@ test("normalisation refuses invalid values and names every problem", () => {
   );
   assert.doesNotThrow(() => A.normaliseDoc({ global: { keyboard: "en-us", country: "us", timezone: "America/New_York" } }));
 });
+
+/* ------------------------------ comments ----------------------------- */
+
+test("comments are emitted as # lines above their key", () => {
+  const toml = A.emitToml({
+    "network.interface-name-pinning.mapping": { "aa:bb:cc:dd:ee:ff": "nic0", "aa:bb:cc:dd:ee:00": "nic1" },
+    comments: { "network.interface-name-pinning.mapping": { "aa:bb:cc:dd:ee:ff": "onboard port 1\nsecond line" } },
+  });
+  assert.match(toml, /# onboard port 1 second line\n"aa:bb:cc:dd:ee:ff" = "nic0"\n"aa:bb:cc:dd:ee:00" = "nic1"/);
+  assert.ok(!toml.includes("[comments]"), "comments never become a TOML table");
+});
+
+test("normalisation keeps only comments that still belong to something", () => {
+  const doc = A.normaliseDoc({
+    global: { fqdn: "pve.example.com" },
+    "network.interface-name-pinning.mapping": { "aa:bb:cc:dd:ee:ff": "nic0" },
+    must_contain: ['"serial":"ABC1234"'],
+    comments: {
+      global: { fqdn: "  rack 3  ", keyboard: "orphan" },
+      "network.interface-name-pinning.mapping": { "aa:bb:cc:dd:ee:ff": "left port" },
+      must_contain: { '"serial":"ABC1234"': "servervirtual2 service tag", gone: "orphan" },
+      bogus: { x: "not a scope" },
+      "disk-setup": { filesystem: "" },
+    },
+  });
+  assert.deepEqual(doc.comments, {
+    global: { fqdn: "rack 3" },
+    "network.interface-name-pinning.mapping": { "aa:bb:cc:dd:ee:ff": "left port" },
+    must_contain: { '"serial":"ABC1234"': "servervirtual2 service tag" },
+  });
+  assert.ok(!("comments" in A.normaliseDoc({ global: { fqdn: "pve.example.com" } })));
+});
+
+test("an answer's own key never inherits Default's comment", () => {
+  const merged = A.mergeDocs(
+    { global: { fqdn: "default.example.com", keyboard: "en-us" }, comments: { global: { fqdn: "placeholder", keyboard: "everyone" } } },
+    { global: { fqdn: "node1.example.com" } },
+  );
+  assert.deepEqual(merged.comments.global, { keyboard: "everyone" });
+  const own = A.mergeDocs(merged, { global: { fqdn: "node2.example.com" }, comments: { global: { fqdn: "node 2" } } });
+  assert.equal(own.comments.global.fqdn, "node 2");
+});

@@ -290,14 +290,18 @@ function renderSection(section) {
       },
     }) : null;
 
+    // NIC pinning rows are bare MAC -> name pairs, so their comment is always shown.
+    const note = commentField(section.id, key, { alwaysShow: !!section.freeform });
+
     rows.append(el("div", { class: "keyrow" }, [
       el("div", { class: "kname" }, [
         el("span", { text: key }),
         helpBtn,
+        note.toggle,
         isSecret ? el("span", { class: "tag", text: "secret" }) : null,
       ]),
-      el("div", { class: "vcol" }, [vwrap, err, helpText]),
-      el("button", { text: "−", title: "remove", onclick: () => { delete table[key]; markDirty(); renderAnswer(); } }),
+      el("div", { class: "vcol" }, [vwrap, err, note.input, helpText]),
+      el("button", { text: "−", title: "remove", onclick: () => { delete table[key]; dropComment(section.id, key); markDirty(); renderAnswer(); } }),
     ]));
   }
   wrap.append(rows);
@@ -428,6 +432,45 @@ function combo(def, current, onPick) {
   return root;
 }
 
+/* ------------------------------ comments ----------------------------- */
+
+function commentsFor(scope) {
+  const all = (S.answer.doc.comments = S.answer.doc.comments || {});
+  return (all[scope] = all[scope] || {});
+}
+
+function dropComment(scope, key) {
+  const all = S.answer.doc.comments;
+  if (all && all[scope]) delete all[scope][key];
+}
+
+/**
+ * A one-line comment for scope/key. Section comments are written to answer.toml
+ * as a "# ..." line above the key; filter comments are notes for you only.
+ * Returns the input plus, unless alwaysShow, a "#" button that reveals it.
+ */
+function commentField(scope, key, { alwaysShow = false, placeholder } = {}) {
+  const store = commentsFor(scope);
+  let toggle = null;
+  const input = el("input", {
+    class: "comment", maxlength: "200", value: store[key] || "",
+    placeholder: placeholder || "comment, written as a # line in answer.toml",
+    oninput: (e) => {
+      const v = e.target.value.replace(/[\r\n]+/g, " ");
+      if (v.trim()) store[key] = v; else delete store[key];
+      if (toggle) toggle.classList.toggle("on", !!v.trim());
+      markDirty();
+    },
+  });
+  if (alwaysShow) return { input, toggle: null };
+  input.hidden = !store[key];
+  toggle = el("button", {
+    class: "help" + (store[key] ? " on" : ""), type: "button", text: "#", title: "Add a comment",
+    onclick: () => { input.hidden = !input.hidden; if (!input.hidden) input.focus(); },
+  });
+  return { input, toggle };
+}
+
 /* ------------------------------- filters ----------------------------- */
 
 function renderFilters() {
@@ -446,9 +489,13 @@ function renderFilters() {
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } });
     card.append(el("div", { class: "adder" }, [el("div", {}, [input, dl]), el("button", { text: "Add", onclick: add })]));
     for (const [i, v] of values.entries()) {
-      card.append(el("div", { class: "keyrow" }, [
-        el("div", { class: "mono", style: "grid-column: span 2; word-break: break-all", text: v }),
-        el("button", { text: "−", onclick: () => { values.splice(i, 1); markDirty(); renderAnswer(); } }),
+      const note = commentField(field, v, { alwaysShow: true, placeholder: "comment, e.g. which machine this is" });
+      card.append(el("div", { class: "keyrow filterrow" }, [
+        el("div", { class: "vcol", style: "grid-column: span 2" }, [
+          el("div", { class: "mono", style: "word-break: break-all", text: v }),
+          note.input,
+        ]),
+        el("button", { text: "−", onclick: () => { values.splice(i, 1); dropComment(field, v); markDirty(); renderAnswer(); } }),
       ]));
     }
     return card;

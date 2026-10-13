@@ -59,14 +59,22 @@ export function emitToml(doc: AnswerDoc, opts: EmitOptions = {}): string {
     const entries = Object.entries(table as Record<string, TomlValue>);
     if (entries.length === 0 && PRUNE_WHEN_EMPTY.includes(section)) continue;
     out.push(`[${encodeKey(section)}]`);
+    const comments = (doc.comments?.[section] ?? {}) as Record<string, unknown>;
     for (const [key, value] of entries) {
       if (value === undefined || value === null || value === "") continue;
+      const comment = typeof comments[key] === "string" ? cleanComment(comments[key] as string) : "";
+      if (comment) out.push(`# ${comment}`);
       const redacted = opts.redact && isSecretKey(section, key);
       out.push(`${encodeKey(key)} = ${redacted ? quote(redactionText) : encodeValue(value)}`);
     }
     out.push("");
   }
   return out.join("\n").replace(/\n+$/, "\n");
+}
+
+/** One line, no control characters, bounded: safe to emit after a `#`. */
+export function cleanComment(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
 /**

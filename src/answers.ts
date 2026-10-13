@@ -11,7 +11,7 @@ import type { Env } from "./env";
 import { bool } from "./env";
 import { encryptString, decryptString, isEncrypted } from "./crypto";
 import { isSecretKey, SECTION_ORDER, DEFAULT_ANSWER_DOC } from "./schema";
-import { coerceValue, type AnswerDoc } from "./toml";
+import { cleanComment, coerceValue, type AnswerDoc } from "./toml";
 import { checkValue } from "./validate";
 
 export const DEFAULT_NAME = "Default";
@@ -234,6 +234,36 @@ export function normaliseDoc(input: AnswerDoc): AnswerDoc {
   if (disk && "disk-list" in disk && Object.keys(disk).some((k) => k.startsWith("filter"))) {
     throw new ValidationError("disk-setup cannot use disk-list and a filter at the same time.");
   }
+
+  const comments = normaliseComments(input.comments, out);
+  if (Object.keys(comments).length) out.comments = comments;
+  return out;
+}
+
+/** Scopes that can carry comments: every TOML section, plus the two filter lists. */
+const FILTER_SCOPES = ["must_contain", "must_not_contain"] as const;
+
+/**
+ * Keep only comments that still belong to something in `doc`: a key present in
+ * its section, or a string present in its filter list. Each is one cleaned line.
+ */
+function normaliseComments(raw: unknown, doc: AnswerDoc): Record<string, Record<string, string>> {
+  const out: Record<string, Record<string, string>> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [scope, table] of Object.entries(raw as Record<string, unknown>)) {
+    if (!table || typeof table !== "object" || Array.isArray(table)) continue;
+    const isFilter = (FILTER_SCOPES as readonly string[]).includes(scope);
+    if (!isFilter && !(SECTION_ORDER as readonly string[]).includes(scope)) continue;
+    const owner = doc[scope];
+    const kept: Record<string, string> = {};
+    for (const [key, text] of Object.entries(table as Record<string, unknown>)) {
+      if (typeof text !== "string") continue;
+      const exists = isFilter ? Array.isArray(owner) && owner.includes(key) : !!owner && key in owner;
+      const clean = cleanComment(text);
+      if (exists && clean) kept[key] = clean;
+    }
+    if (Object.keys(kept).length) out[scope] = kept;
+  }
   return out;
 }
 
@@ -378,6 +408,20 @@ export function mergeDocs(defaultDoc: AnswerDoc, answerDoc: AnswerDoc): AnswerDo
     }
     out[section] = { ...((out[section] ?? {}) as Record<string, unknown>), ...(child as Record<string, unknown>) };
   }
+  // A key the answer sets carries the answer's comment (or none), never Default's.
+  const comments: Record<string, Record<string, string>> = JSON.parse(JSON.stringify(defaultDoc.comments ?? {}));
+  for (const section of SECTION_ORDER) {
+    const child = answerDoc[section];
+    if (!child || typeof child !== "object" || Array.isArray(child)) continue;
+    const own = (answerDoc.comments?.[section] ?? {}) as Record<string, string>;
+    const merged = { ...(comments[section] ?? {}) };
+    for (const key of Object.keys(child as Record<string, unknown>)) {
+      delete merged[key];
+      if (own[key]) merged[key] = own[key];
+    }
+    comments[section] = merged;
+  }
+  out.comments = comments;
   return out;
 }
 
