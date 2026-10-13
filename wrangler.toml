@@ -13,10 +13,10 @@ run_worker_first = true
 [[d1_databases]]
 binding = "DB"
 database_name = "autopve"
-database_id = "00000000-0000-0000-0000-000000000000" # replace with your real D1 id: wrangler d1 create autopve
+database_id = "483d7b40-0907-41c2-a84c-fd567e84f0aa"
 
 # Optional: first-boot files larger than FILE_MAX_BYTES need R2.
-# Uncomment after `wrangler r2 bucket create autopve-files`.
+# Uncomment after `npx wrangler r2 bucket create autopve-files`.
 # [[r2_buckets]]
 # binding = "FILES"
 # bucket_name = "autopve-files"
@@ -43,7 +43,7 @@ HISTORY_MAX_BYTES = "131072"
 # History rows to keep (older rows are trimmed on write).
 HISTORY_LIMIT = "1000"
 
-# Secrets (set with `wrangler secret put <NAME>`), never in this file:
+# Secrets (set with `npx wrangler secret put <NAME>`), never in this file:
 #   ANSWER_ENC_KEY  - base64 32-byte AES-256-GCM key. REQUIRED to store any secret value.
 #   SERVE_TOKEN     - optional shared token; when set, /answer and /hook require
 #                     /answer/<token> in the path or an X-AutoPVE-Token header.
