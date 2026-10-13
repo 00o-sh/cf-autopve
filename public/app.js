@@ -245,37 +245,187 @@ function renderSection(section) {
     const def = section.keys[key] || {};
     const isSecret = !!def.secret || /(^|[-_.])(password|passwd|secret|token|api[-_]?key|private[-_]?key)([-_.]|$)/i.test(key);
     const stored = value === MASK;
-    const control = el("input", {
-      value: stored ? "" : Array.isArray(value) ? "[" + value.join(", ") + "]" : String(value),
-      placeholder: stored ? "stored, encrypted — type to replace" : def.options ? def.options[0] : "",
-      type: isSecret && !stored ? "password" : "text",
-      list: def.options ? listId + "-" + key.replace(/\W/g, "-") : false,
-      oninput: (e) => { table[key] = e.target.value; markDirty(); },
-    });
-    let optionList = null;
-    if (def.options) {
-      optionList = el("datalist", { id: listId + "-" + key.replace(/\W/g, "-") });
-      for (const o of def.options) optionList.append(el("option", { value: o }));
+    const err = el("div", { class: "fielderr" });
+    const showProblem = (v) => {
+      const problem = checkField(section.id, key, v);
+      err.textContent = problem ? `${key} ${problem}` : "";
+      vwrap.classList.toggle("invalid", !!problem);
+    };
+
+    let vwrap;
+    if (def.options && def.type !== "bool" && !isSecret) {
+      vwrap = el("div", { class: "vwrap" }, [
+        combo(def, String(value), (picked) => { table[key] = picked; markDirty(); showProblem(picked); }),
+      ]);
+    } else {
+      const control = el("input", {
+        value: stored ? "" : Array.isArray(value) ? "[" + value.join(", ") + "]" : String(value),
+        placeholder: stored ? "stored, encrypted — type to replace" : def.options ? def.options[0] : def.format ? formatHint(def.format) : "",
+        type: isSecret && !stored ? "password" : "text",
+        list: def.options ? listId + "-" + key.replace(/\W/g, "-") : false,
+        oninput: (e) => { table[key] = e.target.value; markDirty(); showProblem(e.target.value); },
+      });
+      let optionList = null;
+      if (def.options) {
+        optionList = el("datalist", { id: listId + "-" + key.replace(/\W/g, "-") });
+        for (const o of def.options) optionList.append(el("option", { value: o }));
+      }
+      vwrap = el("div", { class: "vwrap" }, [control, optionList]);
+      if (isSecret) {
+        vwrap.append(el("button", {
+          text: "👁", title: "show/hide while typing",
+          onclick: () => { control.type = control.type === "password" ? "text" : "password"; },
+        }));
+      }
     }
-    const vwrap = el("div", { class: "vwrap" }, [control, optionList]);
-    if (isSecret) {
-      vwrap.append(el("button", {
-        text: "👁", title: "show/hide while typing",
-        onclick: () => { control.type = control.type === "password" ? "text" : "password"; },
-      }));
-    }
+    if (!stored) showProblem(value);
+
+    const helpText = def.description ? el("div", { class: "helptext", text: def.description, hidden: true }) : null;
+    const helpBtn = def.description ? el("button", {
+      class: "help", type: "button", text: "?", title: "What is this?", "aria-expanded": "false",
+      onclick: () => {
+        helpText.hidden = !helpText.hidden;
+        helpBtn.setAttribute("aria-expanded", String(!helpText.hidden));
+        helpBtn.classList.toggle("open", !helpText.hidden);
+      },
+    }) : null;
+
     rows.append(el("div", { class: "keyrow" }, [
       el("div", { class: "kname" }, [
         el("span", { text: key }),
-        def.description ? el("span", { class: "help", text: "?", title: def.description }) : null,
+        helpBtn,
         isSecret ? el("span", { class: "tag", text: "secret" }) : null,
       ]),
-      vwrap,
+      el("div", { class: "vcol" }, [vwrap, err, helpText]),
       el("button", { text: "−", title: "remove", onclick: () => { delete table[key]; markDirty(); renderAnswer(); } }),
     ]));
   }
   wrap.append(rows);
   return wrap;
+}
+
+/* ----------------------------- validation ---------------------------- */
+
+const formatRegex = {};
+function formatHint(format) { return S.boot.schema.formats?.[format]?.hint || ""; }
+
+/**
+ * Mirrors checkValue() in src/validate.ts so problems show while typing; the
+ * server re-checks on save and is the authority. Regexes come from the server.
+ */
+function checkField(sectionId, key, value) {
+  const def = S.boot.schema.sections.find((s) => s.id === sectionId)?.keys[key];
+  if (!def || def.type === "list" || value === MASK || value === "" || value == null) return null;
+  const text = String(value).trim();
+  if (def.type === "bool") return /^(true|false|yes|no|1|0)$/i.test(text) ? null : "must be true or false";
+  if (def.type === "int") { const n = Number(text); return text !== "" && Number.isFinite(n) && n >= 0 ? null : "must be a non-negative number"; }
+  if (def.options && !def.options.includes(text)) {
+    return def.options.length > 12 ? "is not a recognised value" : "must be one of " + def.options.join(", ");
+  }
+  if (def.format) {
+    const f = S.boot.schema.formats?.[def.format];
+    if (f) {
+      formatRegex[def.format] ??= new RegExp(f.pattern);
+      if (!formatRegex[def.format].test(text)) return "must be " + f.hint;
+    }
+  }
+  return null;
+}
+
+/** Every problem in the open answer, as "section.key …" strings. */
+function answerProblems() {
+  const out = [];
+  for (const section of S.boot.schema.sections) {
+    for (const [key, value] of Object.entries(S.answer.doc[section.id] || {})) {
+      const p = checkField(section.id, key, value);
+      if (p) out.push(`${section.label}: ${key} ${p}`);
+    }
+  }
+  return out;
+}
+
+/* ------------------------------ combobox ----------------------------- */
+
+let tzOffsets = null;
+function optionLabel(def, option) {
+  if (def.labels?.[option]) return def.labels[option];
+  if (def.options.includes("Europe/Vienna")) {
+    if (!tzOffsets) {
+      tzOffsets = {};
+      const now = new Date();
+      for (const tz of def.options) {
+        try {
+          const part = new Intl.DateTimeFormat("en", { timeZone: tz, timeZoneName: "shortOffset" })
+            .formatToParts(now).find((p) => p.type === "timeZoneName");
+          tzOffsets[tz] = part ? part.value.replace("GMT", "UTC").replace(/^UTC$/, "UTC±0") : "";
+        } catch { tzOffsets[tz] = ""; }
+      }
+    }
+    return tzOffsets[option] || "";
+  }
+  return "";
+}
+
+/** A dropdown with a search box over def.options; calls onPick(value). */
+function combo(def, current, onPick) {
+  let value = current;
+  const btnValue = el("span", { class: "combo-value" });
+  const btnLabel = el("span", { class: "opt-label" });
+  const button = el("button", { type: "button", class: "combo-btn", "aria-haspopup": "listbox" }, [
+    el("span", { class: "combo-main" }, [btnValue, btnLabel]), el("span", { class: "combo-caret", text: "▾" }),
+  ]);
+  const search = el("input", { type: "search", placeholder: "Search…", autocomplete: "off", spellcheck: "false" });
+  const list = el("ul", { class: "combo-list", role: "listbox" });
+  const pop = el("div", { class: "combo-pop", hidden: true }, [search, list]);
+  const root = el("div", { class: "combo" }, [button, pop]);
+  let shown = [];
+  let active = 0;
+
+  const paintButton = () => {
+    btnValue.textContent = value || "choose…";
+    btnLabel.textContent = value ? optionLabel(def, value) : "";
+  };
+  const paintList = () => {
+    const q = search.value.trim().toLowerCase();
+    shown = def.options.filter((o) => !q || o.toLowerCase().includes(q) || optionLabel(def, o).toLowerCase().includes(q));
+    active = Math.max(0, Math.min(active, shown.length - 1));
+    list.innerHTML = "";
+    if (!shown.length) list.append(el("li", { class: "empty", text: "No matches" }));
+    shown.forEach((o, i) => {
+      list.append(el("li", {
+        role: "option", class: (i === active ? "active " : "") + (o === value ? "sel" : ""),
+        onmousedown: (e) => { e.preventDefault(); pick(o); },
+        onmousemove: () => { if (active !== i) { active = i; mark(); } },
+      }, [el("span", { text: o }), el("span", { class: "opt-label", text: optionLabel(def, o) })]));
+    });
+  };
+  const mark = () => {
+    [...list.children].forEach((li, i) => li.classList.toggle("active", i === active));
+    list.children[active]?.scrollIntoView({ block: "nearest" });
+  };
+  const close = () => { pop.hidden = true; document.removeEventListener("mousedown", outside); };
+  const outside = (e) => { if (!root.contains(e.target)) close(); };
+  const open = () => {
+    search.value = "";
+    active = Math.max(0, def.options.indexOf(value));
+    paintList();
+    pop.hidden = false;
+    search.focus();
+    mark();
+    document.addEventListener("mousedown", outside);
+  };
+  const pick = (o) => { value = o; paintButton(); close(); button.focus(); onPick(o); };
+
+  button.addEventListener("click", () => (pop.hidden ? open() : close()));
+  search.addEventListener("input", () => { active = 0; paintList(); });
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(active + 1, shown.length - 1); mark(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(active - 1, 0); mark(); }
+    else if (e.key === "Enter") { e.preventDefault(); if (shown[active]) pick(shown[active]); }
+    else if (e.key === "Escape") { e.preventDefault(); close(); button.focus(); }
+  });
+  paintButton();
+  return root;
 }
 
 /* ------------------------------- filters ----------------------------- */
@@ -696,6 +846,11 @@ function wireGlobalButtons() {
   };
   $("#answer-save").onclick = async () => {
     if (!S.answer) return;
+    const problems = answerProblems();
+    if (problems.length) {
+      toast("Not saved — fix these first: " + problems.join("; "), "bad", 12000);
+      return;
+    }
     try {
       const r = await api("/answers/" + encodeURIComponent(S.answer.name), {
         method: "PUT",

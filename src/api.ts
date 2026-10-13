@@ -17,6 +17,7 @@ import { armAnswer, canServe, defaultArmMinutes, disarmAnswer } from "./guards";
 import { deleteFile, listFiles, putFile, FileError, FILE_NAME_RE } from "./files";
 import { RELAY_MASK, RelayError, deleteRelay, deliver, getRelay, listRelays, maskRelay, saveRelay } from "./relay";
 import { SECTIONS, SECTION_ORDER } from "./schema";
+import { FORMATS } from "./validate";
 import { emitToml } from "./toml";
 
 const json = (data: unknown, status = 200) =>
@@ -97,7 +98,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
       answers: answers.map(publicAnswer),
       relays: relays.map((r) => ({ ...maskRelay(r), has_hmac: !!r.hmac_secret })),
       files,
-      schema: { sections: SECTIONS, order: SECTION_ORDER },
+      schema: { sections: SECTIONS, order: SECTION_ORDER, formats: FORMATS },
       config: {
         encryption_configured: !!env.ANSWER_ENC_KEY,
         serve_token_configured: !!env.SERVE_TOKEN,
