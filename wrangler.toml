@@ -26,7 +26,7 @@ database_id = "483d7b40-0907-41c2-a84c-fd567e84f0aa"
 [vars]
 # --- Cloudflare Access (protects the configurator UI + /api) ---
 ACCESS_TEAM_DOMAIN = "https://bitbybit.cloudflareaccess.com"
-ACCESS_AUD = "4776f236d2afb19f574a9cb8e384d5735d0baa6d5d9da3d083ca2962e8895112"
+ACCESS_AUD = "d1c9f2d9842c6b0ae4261c265632a3ded9f5e7056a50ccee62d540dda5bb0695"
 
 # --- Secret-hosting guardrails (see README "Hosting secrets") ---
 # Default arm window, in minutes, used by the "Arm" button.
