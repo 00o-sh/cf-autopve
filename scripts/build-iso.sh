@@ -11,7 +11,156 @@
 #
 # Needs curl and sha256sum. Uses proxmox-auto-install-assistant + xorriso when
 # installed, otherwise runs them in a throwaway Debian container (docker or podman).
+#
+# Piped into bash (curl … | bash), it stops and asks before doing anything, and
+# the answer defaults to no. Prefer downloading it, reading it, then running the
+# file. Everything is inside main(), called on the last line, so a download cut
+# off part-way runs nothing.
 set -euo pipefail
+
+# The dhclient exit hook for --bootstrap-range. Kept in this file so the script
+# works on its own, including when piped; --print-bootstrap-hook prints it.
+bootstrap_hook_text() {
+  cat <<'AUTOPVE_HOOK'
+# shellcheck shell=dash
+# autopve: bootstrap static network for the Proxmox installer when DHCP gets no answer.
+#
+# Installed by scripts/build-iso.sh --bootstrap-range into the installer's
+# /etc/dhcp/dhclient-exit-hooks.d/. dhclient-script *sources* exit hooks, so
+# this file must never `exit`; everything runs inside one function.
+#
+# The installer's startup runs `dhclient -v` (timeout 10s). When no server
+# answers, dhclient-script runs with reason=FAIL for each interface, and this
+# hook then:
+#   1. skips interfaces without link, or that already have an IPv4 address;
+#   2. picks an address from the bootstrap range, starting at a slot derived
+#      from the NIC's MAC so several machines booting at once spread out;
+#   3. skips addresses that answer ARP (in use), using duplicate detection;
+#   4. keeps the address only if the gateway answers ARP on this NIC, so a
+#      cabled-but-wrong NIC is left alone and the next one is tried;
+#   5. sets the default route and DNS, and stops for good.
+# The installed system's network comes from the answer file, not from here:
+# use network.source = "from-answer" in each machine's answer.
+#
+# Config: /etc/autopve-bootstrap.conf, KEY=VALUE lines:
+#   range=10.0.0.240-10.0.0.249
+#   prefix=24
+#   gateway=10.0.0.1
+#   dns=10.0.0.1 1.1.1.1
+
+autopve_bootstrap() {
+    local conf=/etc/autopve-bootstrap.conf done=/run/autopve-bootstrap.done log=/run/autopve-bootstrap.log
+    local range prefix gateway dns start end n mac slot k ip cand
+
+    # shellcheck disable=SC2154 # $reason and $interface are set by dhclient-script
+    case "$reason" in FAIL|TIMEOUT) ;; *) return 0 ;; esac
+    [ -r "$conf" ] && [ -n "$interface" ] || return 0
+    [ -e "$done" ] && return 0
+
+    autopve_say() { echo "autopve bootstrap: $*" >&2; echo "$*" >>"$log"; }
+
+    if [ "$(cat "/sys/class/net/$interface/carrier" 2>/dev/null)" != 1 ]; then
+        autopve_say "$interface: no link, skipped"
+        return 0
+    fi
+    if ip -4 -o addr show dev "$interface" 2>/dev/null | grep -q ' inet '; then
+        autopve_say "$interface: already has an IPv4 address, skipped"
+        return 0
+    fi
+
+    range=$(sed -n 's/^range=//p' "$conf"); prefix=$(sed -n 's/^prefix=//p' "$conf")
+    gateway=$(sed -n 's/^gateway=//p' "$conf"); dns=$(sed -n 's/^dns=//p' "$conf")
+    start=$(autopve_ip2int "${range%-*}") || { autopve_say "bad range '$range'"; return 0; }
+    end=$(autopve_ip2int "${range#*-}") || { autopve_say "bad range '$range'"; return 0; }
+    case "$prefix" in ''|*[!0-9]*) autopve_say "bad prefix '$prefix'"; return 0 ;; esac
+    autopve_ip2int "$gateway" >/dev/null || { autopve_say "bad gateway '$gateway'"; return 0; }
+    [ "$end" -ge "$start" ] || { autopve_say "range end is before its start"; return 0; }
+
+    n=$((end - start + 1))
+    mac=$(cat "/sys/class/net/$interface/address" 2>/dev/null)
+    slot=$(( $(printf '%s' "$mac" | cksum | cut -d' ' -f1) % n ))
+    ip link set dev "$interface" up
+
+    autopve_say "$interface ($mac): no DHCP answer, trying $range"
+    k=0
+    while [ "$k" -lt "$n" ]; do
+        cand=$(autopve_int2ip $((start + (slot + k) % n)))
+        k=$((k + 1))
+        # -D: exit status 0 only when nobody answers for this address.
+        if ! arping -D -q -c 2 -w 3 -I "$interface" "$cand" >/dev/null 2>&1; then
+            autopve_say "$cand is in use, next"
+            continue
+        fi
+        ip -4 addr add "$cand/$prefix" dev "$interface" || continue
+        if ! arping -q -c 2 -w 3 -I "$interface" -s "$cand" "$gateway" >/dev/null 2>&1; then
+            autopve_say "$interface: gateway $gateway does not answer, not the provisioning network"
+            ip -4 addr del "$cand/$prefix" dev "$interface" 2>/dev/null
+            return 0
+        fi
+        ip -4 route replace default via "$gateway" dev "$interface"
+        if [ -n "$dns" ]; then
+            : >/etc/resolv.conf.autopve
+            for ip in $dns; do echo "nameserver $ip" >>/etc/resolv.conf.autopve; done
+            cat /etc/resolv.conf.autopve >"$(readlink -f /etc/resolv.conf 2>/dev/null || echo /etc/resolv.conf)"
+            rm -f /etc/resolv.conf.autopve
+        fi
+        echo "$interface $cand/$prefix via $gateway" >"$done"
+        autopve_say "$interface: using $cand/$prefix via $gateway${dns:+, dns $dns}"
+        return 0
+    done
+    autopve_say "$interface: every address in $range is in use"
+    return 0
+}
+
+autopve_ip2int() {
+    local a b c d rest
+    case "$1" in *[!0-9.]*|'') return 1 ;; esac
+    a=${1%%.*}; rest=${1#*.}; b=${rest%%.*}; rest=${rest#*.}; c=${rest%%.*}; d=${rest#*.}
+    for o in "$a" "$b" "$c" "$d"; do
+        case "$o" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$o" -le 255 ] || return 1
+    done
+    [ "$1" = "$a.$b.$c.$d" ] || return 1
+    echo $(( (a << 24) + (b << 16) + (c << 8) + d ))
+}
+
+autopve_int2ip() {
+    echo "$(( ($1 >> 24) & 255 )).$(( ($1 >> 16) & 255 )).$(( ($1 >> 8) & 255 )).$(( $1 & 255 ))"
+}
+
+autopve_bootstrap
+AUTOPVE_HOOK
+}
+
+# Code that arrived through a pipe has had no chance to be read. Ask, on the
+# terminal (stdin is the script itself), and treat anything but yes as no.
+confirm_unreviewed_run() {
+  [ -f "${BASH_SOURCE[0]:-}" ] && return 0
+  cat >&2 <<'EOF'
+
+  build-iso.sh is being run straight from the internet (piped into bash), so
+  nobody has read the code that is about to run on this machine as you. It
+  downloads a Proxmox ISO, may start docker or podman, and writes under --out.
+
+  The safer way is to download it, read it, then run the file:
+
+    curl -fsSLo build-iso.sh https://raw.githubusercontent.com/00o-sh/cf-autopve/<commit>/scripts/build-iso.sh
+    less build-iso.sh
+    bash build-iso.sh --url …
+
+EOF
+  if ! ( : </dev/tty ) 2>/dev/null; then
+    die "no terminal to ask on, so not running. Download the script, review it, and run the file."
+  fi
+  local reply=""
+  read -r -p "  Run this unreviewed code now? [y/N] " reply </dev/tty || reply=""
+  case "$reply" in
+    y|Y|yes|YES|Yes) echo >&2 ;;
+    *) die "not running. Nothing was downloaded or changed." ;;
+  esac
+}
+
+main() {
 
 ISO_MIRROR="https://enterprise.proxmox.com/iso"
 URL="${AUTOPVE_URL:-}"
@@ -49,6 +198,7 @@ Usage: build-iso.sh [options]
                      give each machine network.source = "from-answer".
   --bootstrap-gateway IP   gateway for the bootstrap range (required with --bootstrap-range)
   --bootstrap-dns IP[,IP]  DNS servers for the bootstrap range (default: the gateway)
+  --print-bootstrap-hook   print the dhclient hook --bootstrap-range installs, and exit
   --runner MODE      auto | native | docker | podman (default: auto)
   --safe-copy        copy the ISO with plain reads/writes (needs strace); on by default under WSL,
                      where the tool's in-kernel copy can fail with "Cannot allocate memory"
@@ -71,12 +221,15 @@ while [ $# -gt 0 ]; do
     --bootstrap-range) BOOT_RANGE="${2:?}"; shift 2 ;;
     --bootstrap-gateway) BOOT_GW="${2:?}"; shift 2 ;;
     --bootstrap-dns) BOOT_DNS="${2:?}"; shift 2 ;;
+    --print-bootstrap-hook) bootstrap_hook_text; exit 0 ;;
     --runner) RUNNER="${2:?}"; shift 2 ;;
     --safe-copy) SAFE_COPY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown option: $1" ;;
   esac
 done
+
+confirm_unreviewed_run
 
 [ -n "$URL" ] || { usage >&2; die "--url (or AUTOPVE_URL) is required"; }
 [ -z "$VERSION" ] || [ -z "$ISO" ] || die "use --version or --iso, not both"
@@ -113,8 +266,9 @@ prefix=$B_PREFIX
 gateway=$BOOT_GW
 dns=${BOOT_DNS//,/ }"
 fi
-HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/iso"
-[ -z "$BOOTSTRAP_CONF" ] || [ -f "$HOOK_DIR/autopve-bootstrap" ] || die "missing $HOOK_DIR/autopve-bootstrap"
+AUTOPVE_HOOK_TEXT=""
+[ -z "$BOOTSTRAP_CONF" ] || AUTOPVE_HOOK_TEXT="$(bootstrap_hook_text)"
+export AUTOPVE_HOOK_TEXT
 
 # Accept https://host, https://host/ or https://host/answer.
 URL="${URL%/}"; URL="${URL%/answer}"
@@ -123,8 +277,9 @@ case "$URL" in https://*) ;; http://*) say "warning: plain http; the Worker refu
 TOKEN=""
 if [ "$NO_TOKEN" -eq 0 ]; then
   TOKEN="${AUTOPVE_TOKEN:-}"
-  if [ -z "$TOKEN" ] && [ -t 0 ]; then
-    read -rsp "SERVE_TOKEN (leave empty if the deployment has none): " TOKEN; echo >&2
+  # Read from the terminal, not stdin: when piped, stdin is this script.
+  if [ -z "$TOKEN" ] && ( : </dev/tty ) 2>/dev/null; then
+    read -rsp "SERVE_TOKEN (leave empty if the deployment has none): " TOKEN </dev/tty; echo >&2
   fi
   [ -n "$TOKEN" ] || say "no token given; building for a deployment without SERVE_TOKEN"
 fi
@@ -280,7 +435,8 @@ inject_bootstrap() {
   awk -v a="$anchor" "{ print } \$0 == a { print \"    cp -a /autopve-overlay/. /mnt/.installer-mp/ 2>/dev/null || true # autopve: bootstrap network\" }" \
     "$w/x/init" >"$w/add/init"
   chmod 0755 "$w/add/init"
-  install -m 0644 "$AUTOPVE_HOOK_FILE" "$w/add/autopve-overlay/etc/dhcp/dhclient-exit-hooks.d/zz-autopve-bootstrap"
+  printf "%s\n" "$AUTOPVE_HOOK_TEXT" >"$w/add/autopve-overlay/etc/dhcp/dhclient-exit-hooks.d/zz-autopve-bootstrap"
+  chmod 0644 "$w/add/autopve-overlay/etc/dhcp/dhclient-exit-hooks.d/zz-autopve-bootstrap"
   printf "%s\n" "$AUTOPVE_BOOTSTRAP_CONF" >"$w/add/autopve-overlay/etc/autopve-bootstrap.conf"
   chmod 0644 "$w/add/autopve-overlay/etc/autopve-bootstrap.conf"
   (cd "$w/add" && find . -mindepth 1 | sed "s|^\./||" | LC_ALL=C sort | cpio -o -H newc -R 0:0 --quiet | zstd -19 -q) >"$w/extra.cpio.zst"
@@ -304,21 +460,19 @@ case "$RUNNER" in
       2>&1 | { grep -v --line-buffered 'arch_set_scno' || true; }
     if [ -n "$BOOTSTRAP_CONF" ]; then
       for t in zstd cpio; do command -v "$t" >/dev/null || die "--bootstrap-range needs $t: sudo apt install $t"; done
-      export AUTOPVE_HOOK_FILE="$HOOK_DIR/autopve-bootstrap"
       eval "$INJECT_BOOTSTRAP"
       inject_bootstrap "$OUTPUT" || die "adding the bootstrap network failed"
     fi
     ;;
   docker|podman)
     MOUNTS=(-v "$ISO_DIR:/src:ro" -v "$OUT_DIR:/out")
-    [ -z "$BOOTSTRAP_CONF" ] || MOUNTS+=(-v "$HOOK_DIR:/autopve-iso:ro")
     if [ -n "$FIRST_BOOT" ]; then
       MOUNTS+=(-v "$(cd "$(dirname "$FIRST_BOOT")" && pwd)/$(basename "$FIRST_BOOT"):/first-boot:ro")
       FB_ARGS=(--on-first-boot /first-boot)
     fi
     # shellcheck disable=SC2016  # expands inside the container, not here
     "$RUNNER" run --rm -e AUTOPVE_ANSWER_URL -e AUTOPVE_BASE_ANSWER_URL -e AUTOPVE_AUTH_TOKEN -e PICK_FETCH -e AUTOPVE_SAFE_COPY \
-      -e INJECT_BOOTSTRAP -e AUTOPVE_BOOTSTRAP_CONF -e AUTOPVE_HOOK_FILE=/autopve-iso/autopve-bootstrap "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euo pipefail -c '
+      -e INJECT_BOOTSTRAP -e AUTOPVE_BOOTSTRAP_CONF -e AUTOPVE_HOOK_TEXT "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq >/dev/null
       apt-get install -y -qq --no-install-recommends ca-certificates curl xorriso strace zstd cpio >/dev/null
@@ -361,3 +515,6 @@ EOF
     answer. Each machine's answer should set network.source = "from-answer"
     with its own cidr/gateway/dns; "from-dhcp" would keep the bootstrap address.
 EOF
+}
+
+main "$@"

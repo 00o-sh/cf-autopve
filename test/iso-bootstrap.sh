@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise scripts/iso/autopve-bootstrap with the installer's own dhclient-script,
+# Exercise the bootstrap hook (build-iso.sh --print-bootstrap-hook) with the installer's own dhclient-script,
 # dhclient.conf and busybox, on a fake LAN that has no DHCP server.
 #
 #   sudo test/iso-bootstrap.sh path/to/proxmox-ve_X.Y-Z.iso
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ISO="${1:?usage: $0 proxmox-ve.iso}"
-HOOK="$(cd "$(dirname "$0")/.." && pwd)/scripts/iso/autopve-bootstrap"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 W="$(mktemp -d)"
 cleanup() {
   pkill -f "dhclient.*$W" 2>/dev/null || true
@@ -27,7 +27,7 @@ xorriso -osirrox on -indev "$ISO" -extract /pve-base.squashfs "$W/base.sqfs" >/d
 unsquashfs -q -d "$W/inst" "$W/inst.sqfs" etc/dhcp usr/sbin/dhclient-script >/dev/null
 unsquashfs -q -d "$W/base" "$W/base.sqfs" usr/bin/busybox >/dev/null
 rm -f "$W"/*.sqfs
-install -m 0644 "$HOOK" "$W/inst/etc/dhcp/dhclient-exit-hooks.d/zz-autopve-bootstrap"
+"$REPO/scripts/build-iso.sh" --print-bootstrap-hook >"$W/inst/etc/dhcp/dhclient-exit-hooks.d/zz-autopve-bootstrap"
 mkdir -p "$W/bin"
 for a in arping ping; do ln -s "$W/base/usr/bin/busybox" "$W/bin/$a"; done
 

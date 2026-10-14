@@ -242,6 +242,48 @@ proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http \
 # older assistants: --url https://autopve.example.com/answer/<SERVE_TOKEN>
 ```
 
+#### Running build-iso.sh without cloning the repo
+
+> **Don't pipe scripts from the internet into a shell, this one included, until you've read them.**
+> `curl … | bash` runs whatever the server sends at that moment, as you, with no chance to look
+> first. A compromised account, a hijacked DNS name or a man-in-the-middle all turn that one-liner into
+> someone else's code running on your jumpbox. Download it, read it, verify it, then run the file.
+
+The way to do it:
+
+```bash
+# 1. Pin a commit you (or someone you trust) reviewed, not a branch that can change under you.
+COMMIT=<full commit sha from github.com/00o-sh/cf-autopve/commits/main>
+curl -fsSLo build-iso.sh "https://raw.githubusercontent.com/00o-sh/cf-autopve/$COMMIT/scripts/build-iso.sh"
+
+# 2. Read it. All of it: it downloads an ISO, may start docker/podman, and writes under --out.
+less build-iso.sh
+
+# 3. Optionally record what you reviewed, and check it before later runs.
+sha256sum build-iso.sh
+
+# 4. Run the file you read.
+bash build-iso.sh --url https://autopve.example.com
+```
+
+The file is self-contained, including the `--bootstrap-range` hook (`--print-bootstrap-hook` prints it),
+so nothing else is fetched from this repo at run time.
+
+If you pipe it anyway (`curl -fsSL …/scripts/build-iso.sh | bash -s -- --url …`), the script stops
+before doing anything:
+
+- It explains that the code is unreviewed and asks `Run this unreviewed code now? [y/N]` on the
+  terminal.
+- Only `y` or `yes` continues. Enter, `n` or anything else stops it, with nothing downloaded or
+  written.
+- With no terminal to ask on (CI, cron, `ssh host 'curl … | bash'`), it refuses outright. Download
+  the file, review it and run that instead.
+- The whole script is one function called on its last line, so a download cut off part-way runs
+  nothing.
+
+The prompt is a speed bump, not a security control: by the time it shows, the code that prints it is
+already running. Reviewing the file is the control.
+
 ### Networks without DHCP
 
 The installer has to be online before it can fetch an answer. In HTTP mode it
