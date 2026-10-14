@@ -4,4 +4,4 @@ node_modules/
 dist/
 *.log
 .test-build/
-iso/
+/iso/

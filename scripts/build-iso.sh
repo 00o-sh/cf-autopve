@@ -4,6 +4,7 @@
 #   AUTOPVE_URL=https://autopve.example.com scripts/build-iso.sh            # newest PVE release
 #   scripts/build-iso.sh --url https://autopve.example.com --version 9.2-1
 #   scripts/build-iso.sh --url https://autopve.example.com --iso ./proxmox-ve_9.2-1.iso
+#   scripts/build-iso.sh --url … --bootstrap-range 10.0.0.240-10.0.0.249/24 --bootstrap-gateway 10.0.0.1
 #
 # One ISO serves every node: the Worker picks the answer from the hardware the
 # installer reports, so you only rebuild for a new PVE release or a new token.
@@ -22,6 +23,9 @@ FIRST_BOOT=""
 NO_TOKEN=0
 TOKEN_IN_URL=0
 SAFE_COPY=auto
+BOOT_RANGE=""
+BOOT_GW=""
+BOOT_DNS=""
 
 die() { echo "build-iso: $*" >&2; exit 1; }
 say() { echo "==> $*" >&2; }
@@ -38,6 +42,13 @@ Usage: build-iso.sh [options]
   --no-token         the deployment has no SERVE_TOKEN
   --token-in-url     put the token in the answer URL even if the assistant can send it as an
                      Authorization header (the default when it supports --answer-auth-token)
+  --bootstrap-range START-END/PREFIX
+                     for networks without DHCP: if DHCP gets no answer, the installer takes a
+                     free address from this range (e.g. 10.0.0.240-10.0.0.249/24) to fetch its
+                     answer. The installed system's network still comes from the answer file:
+                     give each machine network.source = "from-answer".
+  --bootstrap-gateway IP   gateway for the bootstrap range (required with --bootstrap-range)
+  --bootstrap-dns IP[,IP]  DNS servers for the bootstrap range (default: the gateway)
   --runner MODE      auto | native | docker | podman (default: auto)
   --safe-copy        copy the ISO with plain reads/writes (needs strace); on by default under WSL,
                      where the tool's in-kernel copy can fail with "Cannot allocate memory"
@@ -57,6 +68,9 @@ while [ $# -gt 0 ]; do
     --first-boot) FIRST_BOOT="${2:?}"; shift 2 ;;
     --no-token) NO_TOKEN=1; shift ;;
     --token-in-url) TOKEN_IN_URL=1; shift ;;
+    --bootstrap-range) BOOT_RANGE="${2:?}"; shift 2 ;;
+    --bootstrap-gateway) BOOT_GW="${2:?}"; shift 2 ;;
+    --bootstrap-dns) BOOT_DNS="${2:?}"; shift 2 ;;
     --runner) RUNNER="${2:?}"; shift 2 ;;
     --safe-copy) SAFE_COPY=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -69,6 +83,38 @@ done
 command -v curl >/dev/null || die "curl is required"
 command -v sha256sum >/dev/null || die "sha256sum is required"
 [ -z "$FIRST_BOOT" ] || [ -f "$FIRST_BOOT" ] || die "first-boot file not found: $FIRST_BOOT"
+
+# ------------------------------------------------------------ bootstrap network
+is_ipv4() {
+  local IFS=. o; local -a p
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  read -ra p <<<"$1"
+  for o in "${p[@]}"; do [ $((10#$o)) -le 255 ] || return 1; done
+}
+ip2int() { local IFS=.; local -a p; read -ra p <<<"$1"; echo $(( (10#${p[0]} << 24) + (10#${p[1]} << 16) + (10#${p[2]} << 8) + 10#${p[3]} )); }
+
+BOOTSTRAP_CONF=""
+if [ -n "$BOOT_RANGE$BOOT_GW$BOOT_DNS" ]; then
+  [ -n "$BOOT_RANGE" ] && [ -n "$BOOT_GW" ] || die "--bootstrap-range and --bootstrap-gateway go together"
+  [[ "$BOOT_RANGE" =~ ^([0-9.]+)-([0-9.]+)/([0-9]+)$ ]] || die "--bootstrap-range must look like 10.0.0.240-10.0.0.249/24"
+  B_START="${BASH_REMATCH[1]}"; B_END="${BASH_REMATCH[2]}"; B_PREFIX="${BASH_REMATCH[3]}"
+  is_ipv4 "$B_START" && is_ipv4 "$B_END" || die "--bootstrap-range: not IPv4 addresses"
+  [ "$B_PREFIX" -ge 1 ] && [ "$B_PREFIX" -le 32 ] || die "--bootstrap-range: prefix must be 1-32"
+  is_ipv4 "$BOOT_GW" || die "--bootstrap-gateway: not an IPv4 address"
+  [ "$(ip2int "$B_END")" -ge "$(ip2int "$B_START")" ] || die "--bootstrap-range: end is before start"
+  B_MASK=$(( (0xffffffff << (32 - B_PREFIX)) & 0xffffffff ))
+  for a in "$B_END" "$BOOT_GW"; do
+    [ $(( $(ip2int "$a") & B_MASK )) -eq $(( $(ip2int "$B_START") & B_MASK )) ] || die "--bootstrap: $a is not in $B_START/$B_PREFIX"
+  done
+  BOOT_DNS="${BOOT_DNS:-$BOOT_GW}"
+  for a in ${BOOT_DNS//,/ }; do is_ipv4 "$a" || die "--bootstrap-dns: $a is not an IPv4 address"; done
+  BOOTSTRAP_CONF="range=$B_START-$B_END
+prefix=$B_PREFIX
+gateway=$BOOT_GW
+dns=${BOOT_DNS//,/ }"
+fi
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/iso"
+[ -z "$BOOTSTRAP_CONF" ] || [ -f "$HOOK_DIR/autopve-bootstrap" ] || die "missing $HOOK_DIR/autopve-bootstrap"
 
 # Accept https://host, https://host/ or https://host/answer.
 URL="${URL%/}"; URL="${URL%/answer}"
@@ -182,6 +228,7 @@ FB_ARGS=()
 
 # Sets FETCH_ARGS from what the installed assistant supports. Kept as text so
 # the container runs the identical logic.
+# shellcheck disable=SC2089,SC2090 # code as text, run with eval on both sides
 PICK_FETCH='
 FETCH_ARGS=(--url "$AUTOPVE_ANSWER_URL")
 if [ -n "$AUTOPVE_AUTH_TOKEN" ]; then
@@ -197,7 +244,55 @@ if [ "${FETCH_ARGS[2]:-}" != --answer-auth-token ]; then
   else echo "==> answer URL $AUTOPVE_BASE_ANSWER_URL/<token>" >&2; fi
 fi
 '
+# shellcheck disable=SC2090
 export PICK_FETCH
+
+# Appends a small archive to the ISO's initrd: the bootstrap hook + its config,
+# and a copy of the initrd's /init with one added line that copies them into
+# the installer's root before it starts. The kernel unpacks appended archives
+# in order and later files replace earlier ones, so the stock initrd is left
+# intact. The ISO is edited in place the way prepare-iso does it: same boot
+# records, same volume UUID (the installer finds its medium by that UUID).
+# shellcheck disable=SC2089 # code as text, run with eval on both sides
+INJECT_BOOTSTRAP='
+inject_bootstrap() {
+  local iso="$1" w uuid anchor
+  anchor="    cp /.cd-info /mnt/.installer-mp/ || true"
+  w=$(mktemp -d)
+  local report geometry=()
+  report=$(xorriso -dev "$iso" -report_system_area cmd 2>/dev/null)
+  uuid=$(printf "%s\n" "$report" | sed -n "s/^-volume_date uuid .\([0-9]*\).*/\1/p")
+  [ -n "$uuid" ] || { echo "build-iso: could not read the ISO volume UUID" >&2; return 1; }
+  # A second xorriso pass would otherwise recompute the hybrid MBR geometry.
+  # Carry it over so the boot records stay exactly as prepare-iso wrote them.
+  for g in $(printf "%s\n" "$report" | sed -n "s/^-boot_image any \(partition_hd_cyl=[0-9]*\|partition_sec_hd=[0-9]*\)$/\1/p"); do
+    geometry+=(-boot_image any "$g")
+  done
+  xorriso -osirrox on -indev "$iso" -extract /boot/initrd.img "$w/initrd.img" >/dev/null 2>&1 \
+    || { echo "build-iso: could not extract /boot/initrd.img" >&2; return 1; }
+  mkdir -p "$w/x" "$w/add/autopve-overlay/etc/dhcp/dhclient-exit-hooks.d"
+  (cd "$w/x" && zstd -dcq ../initrd.img | cpio -id --quiet init) \
+    || { echo "build-iso: could not unpack the initrd" >&2; return 1; }
+  if [ "$(grep -cxF "$anchor" "$w/x/init")" != 1 ]; then
+    echo "build-iso: this ISO'"'"'s installer init is not one --bootstrap-range knows how to extend; build without it" >&2
+    return 1
+  fi
+  awk -v a="$anchor" "{ print } \$0 == a { print \"    cp -a /autopve-overlay/. /mnt/.installer-mp/ 2>/dev/null || true # autopve: bootstrap network\" }" \
+    "$w/x/init" >"$w/add/init"
+  chmod 0755 "$w/add/init"
+  install -m 0644 "$AUTOPVE_HOOK_FILE" "$w/add/autopve-overlay/etc/dhcp/dhclient-exit-hooks.d/zz-autopve-bootstrap"
+  printf "%s\n" "$AUTOPVE_BOOTSTRAP_CONF" >"$w/add/autopve-overlay/etc/autopve-bootstrap.conf"
+  chmod 0644 "$w/add/autopve-overlay/etc/autopve-bootstrap.conf"
+  (cd "$w/add" && find . -mindepth 1 | sed "s|^\./||" | LC_ALL=C sort | cpio -o -H newc -R 0:0 --quiet | zstd -19 -q) >"$w/extra.cpio.zst"
+  cat "$w/initrd.img" "$w/extra.cpio.zst" >"$w/initrd.new"
+  xorriso -boot_image any keep "${geometry[@]}" -volume_date uuid "$uuid" -dev "$iso" -map "$w/initrd.new" /boot/initrd.img >/dev/null 2>&1 \
+    || { echo "build-iso: could not write the new initrd into the ISO" >&2; return 1; }
+  rm -rf "$w"
+  echo "==> bootstrap network added: $(printf "%s" "$AUTOPVE_BOOTSTRAP_CONF" | tr "\n" " ")" >&2
+}
+'
+# shellcheck disable=SC2090
+export INJECT_BOOTSTRAP AUTOPVE_BOOTSTRAP_CONF="$BOOTSTRAP_CONF"
 
 say "building with $RUNNER"
 case "$RUNNER" in
@@ -207,18 +302,26 @@ case "$RUNNER" in
     ${COPY_WRAP[@]+"${COPY_WRAP[@]}"} proxmox-auto-install-assistant prepare-iso "$ISO" --fetch-from http \
       "${FETCH_ARGS[@]}" --output "$OUTPUT" ${FB_ARGS[@]+"${FB_ARGS[@]}"} \
       2>&1 | { grep -v --line-buffered 'arch_set_scno' || true; }
+    if [ -n "$BOOTSTRAP_CONF" ]; then
+      for t in zstd cpio; do command -v "$t" >/dev/null || die "--bootstrap-range needs $t: sudo apt install $t"; done
+      export AUTOPVE_HOOK_FILE="$HOOK_DIR/autopve-bootstrap"
+      eval "$INJECT_BOOTSTRAP"
+      inject_bootstrap "$OUTPUT" || die "adding the bootstrap network failed"
+    fi
     ;;
   docker|podman)
     MOUNTS=(-v "$ISO_DIR:/src:ro" -v "$OUT_DIR:/out")
+    [ -z "$BOOTSTRAP_CONF" ] || MOUNTS+=(-v "$HOOK_DIR:/autopve-iso:ro")
     if [ -n "$FIRST_BOOT" ]; then
       MOUNTS+=(-v "$(cd "$(dirname "$FIRST_BOOT")" && pwd)/$(basename "$FIRST_BOOT"):/first-boot:ro")
       FB_ARGS=(--on-first-boot /first-boot)
     fi
     # shellcheck disable=SC2016  # expands inside the container, not here
-    "$RUNNER" run --rm -e AUTOPVE_ANSWER_URL -e AUTOPVE_BASE_ANSWER_URL -e AUTOPVE_AUTH_TOKEN -e PICK_FETCH -e AUTOPVE_SAFE_COPY "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euo pipefail -c '
+    "$RUNNER" run --rm -e AUTOPVE_ANSWER_URL -e AUTOPVE_BASE_ANSWER_URL -e AUTOPVE_AUTH_TOKEN -e PICK_FETCH -e AUTOPVE_SAFE_COPY \
+      -e INJECT_BOOTSTRAP -e AUTOPVE_BOOTSTRAP_CONF -e AUTOPVE_HOOK_FILE=/autopve-iso/autopve-bootstrap "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq >/dev/null
-      apt-get install -y -qq --no-install-recommends ca-certificates curl xorriso strace >/dev/null
+      apt-get install -y -qq --no-install-recommends ca-certificates curl xorriso strace zstd cpio >/dev/null
       curl -fsSL "$1" -o /usr/share/keyrings/proxmox.gpg
       echo "deb [signed-by=/usr/share/keyrings/proxmox.gpg] http://download.proxmox.com/debian/pve $2 pve-no-subscription" \
         > /etc/apt/sources.list.d/pve.list
@@ -232,6 +335,10 @@ case "$RUNNER" in
       ${wrap[@]+"${wrap[@]}"} proxmox-auto-install-assistant prepare-iso "/src/$src" --fetch-from http \
         "${FETCH_ARGS[@]}" --output "/out/$out" --tmp /out "$@" \
         2>&1 | { grep -v --line-buffered arch_set_scno || true; }
+      if [ -n "$AUTOPVE_BOOTSTRAP_CONF" ]; then
+        eval "$INJECT_BOOTSTRAP"
+        inject_bootstrap "/out/$out"
+      fi
     ' "$NAME" "$KEY_URL" "$SUITE" "$(basename "$OUTPUT")" ${FB_ARGS[@]+"${FB_ARGS[@]}"}
     ;;
   *) die "unknown runner: $RUNNER" ;;
@@ -248,4 +355,9 @@ Next:
   * Answers holding a root password are only served while armed: arm the
     answer in the configurator just before you boot.
   * The ISO contains the serve token. Keep it off shared drives.
+EOF
+[ -z "$BOOTSTRAP_CONF" ] || cat >&2 <<EOF
+  * Without DHCP, the installer uses an address from $BOOT_RANGE to fetch its
+    answer. Each machine's answer should set network.source = "from-answer"
+    with its own cidr/gateway/dns; "from-dhcp" would keep the bootstrap address.
 EOF

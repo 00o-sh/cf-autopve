@@ -242,6 +242,54 @@ proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http \
 # older assistants: --url https://autopve.example.com/answer/<SERVE_TOKEN>
 ```
 
+### Networks without DHCP
+
+The installer has to be online before it can fetch an answer. In HTTP mode it
+gets online only through DHCP; Proxmox offers no setting for a static address
+at that point. `build-iso.sh` can add one:
+
+```bash
+scripts/build-iso.sh --url https://autopve.example.com \
+  --bootstrap-range 10.0.0.240-10.0.0.249/24 --bootstrap-gateway 10.0.0.1 [--bootstrap-dns 10.0.0.1,1.1.1.1]
+```
+
+What happens at boot:
+
+1. The installer tries DHCP as usual, for about 10 seconds. If DHCP answers, nothing else changes, so
+   the same ISO works on DHCP networks too.
+2. If nothing answers, a `dhclient` exit hook added by the build takes an address from the bootstrap
+   range:
+   - It starts at a slot derived from the NIC's MAC address, so several machines booting at once
+     spread across the range.
+   - It skips any address that answers ARP.
+   - It keeps the address only if the gateway answers on that NIC. A NIC cabled to some other
+     network is left alone.
+3. The installer fetches its answer over HTTP as normal and installs.
+4. The installed system gets the network from **that machine's answer**, not the bootstrap address.
+   Give each machine:
+
+   ```toml
+   [network]
+   source = "from-answer"
+   cidr = "10.0.0.21/24"
+   gateway = "10.0.0.1"
+   dns = "10.0.0.1"
+   filter.ID_NET_NAME_MAC = "*248a071e05bc"   # which NIC, on multi-NIC machines
+   ```
+
+   `source = "from-dhcp"` would make the installer write the bootstrap address as the machine's
+   permanent configuration.
+
+How it is added: Proxmox's tooling has no hook for this. The build appends a small archive to the
+ISO's initrd. The archive holds the hook, its config, and a copy of the initrd's `/init` with one
+added line that copies them into the installer's root before it starts. The kernel unpacks appended
+archives after the original, so the stock initrd is otherwise untouched. The ISO is updated in place
+the same way `prepare-iso` does it, keeping its boot records and volume UUID. If a future Proxmox ISO
+changes that part of `/init`, the build stops with an error rather than producing a broken ISO.
+
+`test/iso-bootstrap.sh <iso>` (root, network namespaces) runs the hook with that ISO's own
+`dhclient-script`, `dhclient.conf` and busybox, on a fake LAN with no DHCP server.
+
 ### Post-installation webhook relay
 
 Relays need a `SERVE_TOKEN`. A relay fires real automation, and `/hook` has no arm window or allowlist,
