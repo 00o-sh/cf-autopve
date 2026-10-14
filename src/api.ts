@@ -287,7 +287,8 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     const raw = JSON.stringify(body.system_info ?? {});
     const selection = await selectAnswer(env, raw);
     if (!selection) return json({ matched: null, reason: "no answers are configured" });
-    const decision = canServe(env, selection.record, { request, ip: "203.0.113.1", pathToken: env.SERVE_TOKEN ?? null });
+    let decision = canServe(env, selection.record, { request, ip: "203.0.113.1", pathToken: env.SERVE_TOKEN ?? null });
+    if (decision.allowed && selection.templateProblems.length) decision = { allowed: false, reason: selection.templateProblems.join(" ") };
     let info: unknown = {};
     try { info = JSON.parse(raw); } catch { /* raw came from JSON.stringify */ }
     const rules: MatchRule[] = Array.isArray(selection.record.doc.match) ? selection.record.doc.match : [];
@@ -297,6 +298,8 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
       reason: decision.reason,
       match_mode: selection.record.doc.match_mode === "any" ? "any" : "all",
       rules: evaluateRules(info, rules),
+      machine: selection.machine,
+      template_problems: selection.templateProblems,
       toml: emitToml(selection.merged, { redact: true, redactionText: REDACTION }),
       problems: lintMerged(selection.merged),
     });

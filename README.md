@@ -257,6 +257,40 @@ from it, and **Restore** it.
   history at the next save, which also records the state they had until then.
 - Versions need migration `0002`; without it answers still save, and the tab shows the error.
 
+#### Machine tables: one answer for a rack of machines
+
+Instead of one answer per node, give an answer a **machine table** (Filters tab) and use `{{ column }}`
+placeholders in its values:
+
+```csv
+mac,hostname,ip
+24:8a:07:1e:05:bc,pve1,10.0.0.11/24
+24:8a:07:1e:05:bd,pve2,10.0.0.12/24
+```
+
+```toml
+[global]
+fqdn = "{{ hostname }}.lab.example"
+
+[network]
+source = "from-answer"
+cidr = "{{ ip }}"
+```
+
+- The first column is the key, compared (as a glob, case-insensitive) with the **key field**, by default
+  `network_interfaces[].mac`. `dmi.system.serial` works just as well. Paste CSV, edit it in place, or
+  *Load CSV…*; comma, semicolon and tab delimited files all load.
+- An answer with rows only claims machines that have a row, so the table is its routing as well.
+  Match rules and text filters, if also set, must agree.
+- When served, the machine's row fills the placeholders, including ones inherited from `Default`. An
+  answer without a table uses `Default`'s. A placeholder that can't be filled (no row, no such column,
+  an empty cell) refuses the request with the reason in History; a half-rendered answer is never served.
+- On save every row is rendered and checked like a typed value, so `ip = not-an-ip` on row 7 is refused
+  before any install starts. Columns must be names (`hostname`, `zfs_arc`), and integer or boolean keys
+  are re-typed after filling in (`zfs.arc-max = "{{ zfs_arc }}"` serves as a number).
+- Credentials can't use placeholders: the table is stored unencrypted. The table is configurator
+  metadata and never appears in the answer file.
+
 #### Importing and editing as TOML
 
 - **import** (sidebar) creates a new answer from an existing `answer.toml`.
@@ -276,7 +310,7 @@ Either way, the file is parsed with a real TOML parser and mapped onto the edito
 - An imported answer that holds credentials is switched to `armed` and still needs the acknowledgement
   on the Serving tab before it saves.
 
-Filters (`match`, `match_mode`, `must_contain`, `must_not_contain`) are configurator metadata, not part of the file, and are
+Filters (`match`, `match_mode`, `must_contain`, `must_not_contain`) and the machine table are configurator metadata, not part of the file, and are
 left as they are.
 
 #### Answer file coverage
@@ -576,6 +610,8 @@ src/
   api.ts       Access-gated JSON API for the UI
   access.ts    Cloudflare Access JWT verification (JWKS, iss/aud/exp)
   answers.ts   storage, inheritance, filter matching, masking
+  match.ts     field paths and globs over the installer's system information
+  fleet.ts     machine tables and {{ placeholder }} rendering
   guards.ts    serve decisions: mode, arm window, CIDR, token, HTTPS; atomic serve claim
   crypto.ts    AES-256-GCM envelope encryption, HMAC, token compare
   relay.ts     outbound webhook relay, templating, delivery log

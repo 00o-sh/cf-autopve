@@ -14,3 +14,5 @@ export { parse as parseTomlRaw } from "smol-toml";
 export { recordVersion, listVersions, getVersion, renameVersions, deleteVersions, describeSnapshot } from "../src/versions";
 export { machineIds, macsOf, trackAnswer, trackInstalled, listInstalls } from "../src/installs";
 export { default as worker } from "../src/index";
+export { selectAnswer } from "../src/answers";
+export { findMachine, normaliseFleet, checkTemplate, renderTemplate as renderFleet } from "../src/fleet";

@@ -13,6 +13,10 @@ import { encryptString, decryptString, isEncrypted } from "./crypto";
 import { isSecretKey, SECTION_ORDER, DEFAULT_ANSWER_DOC } from "./schema";
 import { cleanComment, coerceValue, type AnswerDoc } from "./toml";
 import { checkValue } from "./validate";
+import { fieldValues, globToRegExp, MATCH_FIELD_RE } from "./match";
+import { asFleet, checkTemplate, findMachine, hasPlaceholder, normaliseFleet, renderTemplate, type Machine } from "./fleet";
+
+export { fieldValues, globToRegExp, MATCH_FIELD_RE };
 
 export const DEFAULT_NAME = "Default";
 
@@ -206,7 +210,8 @@ export function normaliseDoc(input: AnswerDoc): AnswerDoc {
       }
       const v = coerceValue(section, key, raw);
       if (v === undefined || v === "") continue;
-      if (raw !== MASK_MARKER) {
+      // A placeholder is checked once a machine row fills it in (checkTemplate).
+      if (raw !== MASK_MARKER && !hasPlaceholder(raw)) {
         const problem = checkValue(section, key, v);
         if (problem) invalid.push(`${section}.${key} ${problem} (got "${String(raw)}")`);
       }
@@ -256,6 +261,12 @@ export function normaliseDoc(input: AnswerDoc): AnswerDoc {
       throw new ValidationError(`network: with source = "from-dhcp" the installer rejects ${statics.join(", ")}. Use source = "from-answer" or remove them.`);
     }
   }
+
+  const { fleet, error } = normaliseFleet(input.fleet);
+  if (error) throw new ValidationError(error);
+  if (fleet) out.fleet = fleet;
+  const templateProblems = checkTemplate(out, fleet);
+  if (templateProblems.length) throw new ValidationError(`Not saved: ${templateProblems.join("; ")}`);
 
   const comments = normaliseComments(input.comments, out);
   if (Object.keys(comments).length) out.comments = comments;
@@ -435,7 +446,6 @@ export interface MatchRule {
 
 export type MatchMode = "all" | "any";
 
-export const MATCH_FIELD_RE = /^[A-Za-z0-9_$-]+(?:\[\])?(?:\.[A-Za-z0-9_$-]+(?:\[\])?)*$/;
 
 /** Fields worth offering in the editor; any other path works too. */
 export const MATCH_FIELD_SUGGESTIONS = [
@@ -444,44 +454,6 @@ export const MATCH_FIELD_SUGGESTIONS = [
   "dmi.baseboard.serial", "dmi.baseboard.name", "dmi.chassis.serial", "dmi.chassis.asset_tag",
   "product.product", "product.fullname", "iso.release",
 ];
-
-export function globToRegExp(pattern: string): RegExp {
-  let re = "";
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === "*") re += ".*";
-    else if (c === "?") re += ".";
-    else if (c === "[") {
-      const close = pattern.indexOf("]", i + 2);
-      if (close === -1) { re += "\\["; continue; }
-      let body = pattern.slice(i + 1, close);
-      const negate = body.startsWith("!");
-      if (negate) body = body.slice(1);
-      re += `[${negate ? "^" : ""}${body.replace(/[\\\]^]/g, "\\$&")}]`;
-      i = close;
-    } else re += c.replace(/[.+^${}()|\\\]\/]/g, "\\$&");
-  }
-  return new RegExp(`^${re}$`, "i");
-}
-
-/** Every value at `field` in `info` (several when the path crosses a list). */
-export function fieldValues(info: unknown, field: string): string[] {
-  let current: unknown[] = [info];
-  for (const raw of field.split(".")) {
-    const each = raw.endsWith("[]");
-    const key = each ? raw.slice(0, -2) : raw;
-    const next: unknown[] = [];
-    for (const node of current) {
-      if (!node || typeof node !== "object" || Array.isArray(node)) continue;
-      const v = (node as Record<string, unknown>)[key];
-      if (v === undefined || v === null) continue;
-      if (each) { if (Array.isArray(v)) next.push(...v); }
-      else next.push(v);
-    }
-    current = next;
-  }
-  return current.filter((v) => typeof v === "string" || typeof v === "number" || typeof v === "boolean").map(String);
-}
 
 export interface RuleResult extends MatchRule {
   values: string[];
@@ -499,8 +471,9 @@ export function evaluateRules(info: unknown, rules: MatchRule[]): RuleResult[] {
 /**
  * Does this answer claim this machine? Text filters keep their upstream
  * meaning (some must_contain hits, no must_not_contain hits). Match rules,
- * when present, must also hold (all, or any, per match_mode). An answer with
- * only match rules needs no must_contain; must_not_contain still vetoes.
+ * when present, must also hold (all, or any, per match_mode), and so must a
+ * machine table (some row's key matches). An answer with rules or a table
+ * needs no must_contain; must_not_contain still vetoes.
  */
 export function matches(doc: AnswerDoc, systemInfoRaw: string, info?: unknown): boolean {
   const mustContain: string[] = Array.isArray(doc.must_contain) ? doc.must_contain : [];
@@ -508,12 +481,17 @@ export function matches(doc: AnswerDoc, systemInfoRaw: string, info?: unknown): 
   const rules: MatchRule[] = Array.isArray(doc.match) ? doc.match : [];
   if (mustNotContain.some((e) => e.length > 0 && systemInfoRaw.includes(e))) return false;
   const textOk = mustContain.some((e) => e.length > 0 && systemInfoRaw.includes(e));
-  if (rules.length === 0) return textOk;
+  const fleet = asFleet(doc.fleet);
+  const table = !!fleet && fleet.rows.length > 0;
+  if (rules.length === 0 && !table) return textOk;
   if (mustContain.length > 0 && !textOk) return false;
   let parsed = info;
   if (parsed === undefined) {
     try { parsed = JSON.parse(systemInfoRaw); } catch { parsed = {}; }
   }
+  // A machine table routes too: only machines with a row are claimed.
+  if (table && !findMachine(fleet, parsed)) return false;
+  if (rules.length === 0) return true;
   const results = evaluateRules(parsed, rules);
   return doc.match_mode === "any" ? results.some((r) => r.hit) : results.every((r) => r.hit);
 }
@@ -625,9 +603,24 @@ export function lintMerged(doc: AnswerDoc): string[] {
 
 export interface Selection {
   record: AnswerRecord;
-  /** Merged document, still encrypted. */
+  /** Merged document with placeholders filled in, credentials still encrypted. */
   merged: AnswerDoc;
   defaultRecord: AnswerRecord | null;
+  /** The machine table row that filled the placeholders, if any. */
+  machine: Machine | null;
+  /** Why the placeholders could not be filled; the answer must not be served. */
+  templateProblems: string[];
+}
+
+/**
+ * The selected answer's table fills placeholders (including ones it inherits
+ * from Default); an answer without a table uses Default's.
+ */
+function render(merged: AnswerDoc, record: AnswerRecord, def: AnswerRecord | null, info: unknown) {
+  const fleet = asFleet(record.doc.fleet) ?? asFleet(def?.doc.fleet);
+  const machine = fleet ? findMachine(fleet, info) : null;
+  const { doc, problems } = renderTemplate(merged, machine);
+  return { merged: doc, machine, templateProblems: problems };
 }
 
 /**
@@ -645,10 +638,10 @@ export async function selectAnswer(env: Env, systemInfoRaw: string): Promise<Sel
   for (const record of all) {
     if (record.name === DEFAULT_NAME) continue;
     if (!matches(record.doc, systemInfoRaw, info)) continue;
-    return { record, merged: mergeDocs(defaultDoc, record.doc), defaultRecord: def };
+    return { record, defaultRecord: def, ...render(mergeDocs(defaultDoc, record.doc), record, def, info) };
   }
   if (!def) return null;
-  return { record: def, merged: JSON.parse(JSON.stringify(defaultDoc)), defaultRecord: def };
+  return { record: def, defaultRecord: def, ...render(JSON.parse(JSON.stringify(defaultDoc)), def, def, info) };
 }
 
 export function systemName(systemInfo: any): string {
