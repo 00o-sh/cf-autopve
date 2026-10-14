@@ -495,6 +495,37 @@ test("JSON only when the client prefers it", () => {
   assert.equal(A.prefersJson("text/plain;q=0.8, application/json;q=0.8"), true, "a tie goes to JSON");
 });
 
+/* ------------------------ configurator CSRF guard ---------------------- */
+
+const apiReq = (method, headers = {}) =>
+  new Request("https://autopve.example.com/api/answers/node1/arm", { method, headers });
+
+test("the configurator's own writes pass", () => {
+  const same = { "Sec-Fetch-Site": "same-origin", Origin: "https://autopve.example.com" };
+  assert.equal(A.crossSiteWriteRefusal(apiReq("POST", { ...same, "Content-Type": "application/json" })), null);
+  assert.equal(A.crossSiteWriteRefusal(apiReq("POST", { ...same, "Content-Type": "application/json; charset=utf-8" })), null);
+  assert.equal(A.crossSiteWriteRefusal(apiReq("POST", { ...same, "Content-Type": "application/octet-stream" })), null, "file upload");
+  assert.equal(A.crossSiteWriteRefusal(apiReq("PUT", same)), null);
+  assert.equal(A.crossSiteWriteRefusal(apiReq("DELETE", same)), null);
+  assert.equal(A.crossSiteWriteRefusal(apiReq("GET", { "Sec-Fetch-Site": "cross-site" })), null, "reads are not guarded");
+});
+
+test("writes another site triggers are refused", () => {
+  assert.match(A.crossSiteWriteRefusal(apiReq("POST", { "Sec-Fetch-Site": "cross-site", "Content-Type": "application/json" })), /cross-site POST/);
+  assert.match(A.crossSiteWriteRefusal(apiReq("POST", { "Sec-Fetch-Site": "same-site", "Content-Type": "application/json" })), /same-site/, "a sibling subdomain is another site here");
+  assert.match(A.crossSiteWriteRefusal(apiReq("DELETE", { Origin: "https://evil.example" })), /Origin: https:\/\/evil.example/);
+  // A plain HTML form: no preflight, so it must fail on the content type even without fetch metadata.
+  for (const type of ["application/x-www-form-urlencoded", "multipart/form-data; boundary=x", "text/plain", ""]) {
+    const headers = type ? { "Content-Type": type } : {};
+    assert.match(A.crossSiteWriteRefusal(apiReq("POST", headers)), /needs a Content-Type/, type || "(none)");
+  }
+});
+
+test("non-browser clients (no fetch metadata) pass on content type alone", () => {
+  assert.equal(A.crossSiteWriteRefusal(apiReq("POST", { "Content-Type": "application/json" })), null);
+  assert.equal(A.crossSiteWriteRefusal(apiReq("PUT", {})), null);
+});
+
 /* ------------------------------- relay ------------------------------- */
 
 test("relay templates resolve nested paths and escape strings", () => {
