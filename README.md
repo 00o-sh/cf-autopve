@@ -151,7 +151,8 @@ If the repository is connected to Workers Builds, every PR runs `npx wrangler pr
 cp .dev.vars.example .dev.vars     # sets DEV_ALLOW_INSECURE_UI=true and a throwaway ANSWER_ENC_KEY
 npx wrangler d1 migrations apply autopve --local
 npm run dev
-npm test                           # TOML, inheritance, matching, guards, crypto, relay templating
+npm test                           # logic tests, then the built Worker in workerd (Miniflare) against a
+                                   # migrated D1: Access gate, serving, relays, files
 ```
 
 `DEV_ALLOW_INSECURE_UI=true` bypasses Access **and says so in a red banner**. Never set it on a
@@ -168,8 +169,9 @@ source of truth, so use `npm ci`, not `npm install`, unless you are changing a d
 - PRs open before 6am on Mondays (America/Toronto), at most five at a time, and only for releases at
   least 3 days old (7 for `@cloudflare/workers-types`, which publishes daily). Security fixes skip
   both waits.
-- `wrangler`, `@cloudflare/workers-types` and `esbuild` arrive as one PR: wrangler pins a minimum
-  workers-types as a peer, so bumping them separately fails to install.
+- `wrangler`, `miniflare`, `@cloudflare/workers-types` and `esbuild` arrive as one PR: wrangler pins a
+  minimum workers-types as a peer, so bumping them separately fails to install, and the integration
+  tests import the same Miniflare wrangler bundles.
 - Minor and patch dev-tool updates and GitHub Actions digest bumps automerge once CI passes. Majors
   wait for review; a Node major also needs approval on the Dependency Dashboard issue.
 - The lockfile is refreshed on the first of each month.
@@ -475,7 +477,7 @@ src/
   db.ts        history, audit, rate limiting, sysinfo key learning
 public/        the configurator (no build step, no external assets, strict CSP)
 migrations/    D1 schema
-test/          logic tests (node --test)
+test/          logic.test.js (functions) and worker.test.js (the bundled Worker in workerd, real D1)
 ```
 
 ## Credits
