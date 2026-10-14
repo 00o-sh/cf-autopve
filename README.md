@@ -94,7 +94,7 @@ offline-crackable, so it is still treated as a secret here, but it is not a plai
 ## Deploy
 
 ```bash
-npm install
+npm ci                              # Node 22+ (see .nvmrc); installs exactly the lockfile
 
 # 1. database
 npx wrangler d1 create autopve                 # put the returned id in wrangler.toml
@@ -143,6 +143,26 @@ npm test                           # TOML, inheritance, matching, guards, crypto
 
 `DEV_ALLOW_INSECURE_UI=true` bypasses Access **and says so in a red banner**. Never set it on a
 deployment.
+
+### Dependencies
+
+Dev dependencies are pinned to exact versions (`.npmrc` sets `save-exact`) and the lockfile is the
+source of truth, so use `npm ci`, not `npm install`, unless you are changing a dependency.
+`engine-strict` refuses a Node older than wrangler supports.
+
+[Renovate](https://docs.renovatebot.com/) keeps them current (`renovate.json`, `config:best-practices`):
+
+- PRs open before 6am on Mondays (America/Toronto), at most five at a time, and only for releases at
+  least 3 days old (7 for `@cloudflare/workers-types`, which publishes daily). Security fixes skip
+  both waits.
+- `wrangler`, `@cloudflare/workers-types` and `esbuild` arrive as one PR: wrangler pins a minimum
+  workers-types as a peer, so bumping them separately fails to install.
+- Minor and patch dev-tool updates and GitHub Actions digest bumps automerge once CI passes. Majors
+  wait for review; a Node major also needs approval on the Dependency Dashboard issue.
+- The lockfile is refreshed on the first of each month.
+
+CI (`.github/workflows/ci.yml`) runs `npm ci`, `npm audit signatures`, typecheck, tests, a
+`wrangler deploy --dry-run` bundle and shellcheck on every PR, which is what automerge waits on.
 
 ## Using it
 

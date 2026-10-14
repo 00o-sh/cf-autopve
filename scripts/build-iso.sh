@@ -182,6 +182,7 @@ FB_ARGS=()
 
 # Sets FETCH_ARGS from what the installed assistant supports. Kept as text so
 # the container runs the identical logic.
+# shellcheck disable=SC2016,SC2089 # code as text, run with eval on both sides
 PICK_FETCH='
 FETCH_ARGS=(--url "$AUTOPVE_ANSWER_URL")
 if [ -n "$AUTOPVE_AUTH_TOKEN" ]; then
@@ -197,6 +198,7 @@ if [ "${FETCH_ARGS[2]:-}" != --answer-auth-token ]; then
   else echo "==> answer URL $AUTOPVE_BASE_ANSWER_URL/<token>" >&2; fi
 fi
 '
+# shellcheck disable=SC2090
 export PICK_FETCH
 
 say "building with $RUNNER"
