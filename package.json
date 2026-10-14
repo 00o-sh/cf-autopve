@@ -11,11 +11,17 @@
     "test": "node --test test/logic.test.js",
     "db:init:local": "wrangler d1 migrations apply autopve --local",
     "db:init": "wrangler d1 migrations apply autopve --remote",
-    "pretest": "esbuild test/_bundle.ts --bundle --format=esm --platform=neutral --outfile=.test-build/bundle.mjs --log-level=warning"
+    "pretest": "esbuild test/_bundle.ts --bundle --format=esm --platform=neutral --outfile=.test-build/bundle.mjs --log-level=warning",
+    "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260923.1",
-    "typescript": "^7.0.2",
-    "wrangler": "^4.136.3"
-  }
+    "@cloudflare/workers-types": "5.20261007.1",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "wrangler": "4.149.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "npm@10.9.4"
 }
