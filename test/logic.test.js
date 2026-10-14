@@ -526,6 +526,39 @@ test("non-browser clients (no fetch metadata) pass on content type alone", () =>
   assert.equal(A.crossSiteWriteRefusal(apiReq("PUT", {})), null);
 });
 
+/* --------------------- root password hashing (browser) ------------------ */
+
+await import("../public/sha512crypt.js");
+
+test("sha512crypt matches the specification's published vectors", async () => {
+  // https://www.akkadia.org/drepper/SHA-crypt.txt, SHA-512 test vectors
+  const vectors = [
+    ["Hello world!", "saltstring", undefined, "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1"],
+    ["Hello world!", "saltstringsaltstring", 10000, "$6$rounds=10000$saltstringsaltst$OW1/O6BYHV6BcXZu8QVeXbDWra3Oeqh0sbHbbMCVNSnCM/UrjmM0Dp8vOuZeHBy/YTBmSK6H9qs/y3RnOaw5v."],
+    ["This is just a test", "toolongsaltstring", 5000, "$6$rounds=5000$toolongsaltstrin$lQ8jolhgVRVhY4b5pZKaysCLi0QBxGoNeKQzQ3glMhwllF7oGDZxUhx1yxdYcz/e1JSbq3y6JMxxl8audkUEm0"],
+    ["a very much longer text to encrypt.  This one even stretches over morethan one line.", "anotherlongsaltstring", 1400,
+      "$6$rounds=1400$anotherlongsalts$POfYwTEok97VWcjxIiSOjiykti.o/pQs.wPvMxQ6Fm7I6IoYN3CmLs66x9t0oSwbtEW7o7UmJEiDwGqd8p4ur1"],
+    ["the minimum number is still observed", "roundstoolow", 10, "$6$rounds=1000$roundstoolow$kUMsbe306n21p9R.FRkW3IGn.S9NPN0x50YhH1xhLsPuWGsUSklZt58jaTfF4ZEQpyUNGc0dqbpBYYBaHHrsX."],
+  ];
+  for (const [pw, salt, rounds, want] of vectors) assert.equal(await globalThis.sha512crypt(pw, salt, rounds), want);
+});
+
+test("sha512crypt uses a fresh 16-character salt and handles non-ASCII passwords", async () => {
+  const a = await globalThis.sha512crypt("pässwörd ✓");
+  const b = await globalThis.sha512crypt("pässwörd ✓");
+  assert.match(a, /^\$6\$[./0-9A-Za-z]{16}\$[./0-9A-Za-z]{86}$/);
+  assert.notEqual(a, b, "salted");
+});
+
+test("root-password-hashed must be a crypt hash: it goes verbatim into /etc/shadow", () => {
+  for (const ok of ["$6$abcdefgh$xyz", "$y$j9T$salt$hash", "$2b$10$abcdefghijklmnopqrstuv"]) {
+    assert.equal(A.checkValue("global", "root-password-hashed", ok), null, ok);
+  }
+  for (const bad of ["hunter2", "$6$has space", "$6$a:b", "$9$x"]) {
+    assert.match(A.checkValue("global", "root-password-hashed", bad), /crypt\(3\) hash/, bad);
+  }
+});
+
 /* ------------------------------- relay ------------------------------- */
 
 test("relay templates resolve nested paths and escape strings", () => {

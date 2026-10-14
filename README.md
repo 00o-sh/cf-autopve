@@ -93,8 +93,17 @@ If you do host:
    form or a no-CORS fetch cannot send. Scripts using an Access service token are unaffected: they send
    no fetch metadata and pass on the content type.
 
-Prefer `root-password-hashed` over `root-password` (generate with `mkpasswd -m sha-512`). It is still
-offline-crackable, so it is still treated as a secret here, but it is not a plaintext password on the wire.
+Prefer `root-password-hashed` over `root-password`. It is still offline-crackable, so it is still treated
+as a secret here, but it is not a plaintext password on the wire. The configurator makes one for you:
+
+- **Hash it** (next to `root-password`) replaces the typed password with `root-password-hashed`.
+- **Set from password…** (next to `root-password-hashed`) asks for a password twice, without echoing it.
+
+Both compute SHA-512-crypt (`$6$`, the same as `mkpasswd -m sha-512` and `openssl passwd -6`) in your
+browser with a fresh random salt, so the plaintext is never sent, stored or served; only the hash is
+saved, encrypted like any other credential. Because the installer writes `root-password-hashed`
+verbatim into `/etc/shadow`, a value that is not a crypt(3) hash is refused on save rather than locking
+root out.
 
 ## Deploy
 

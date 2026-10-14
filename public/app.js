@@ -50,18 +50,24 @@ function toast(message, kind = "ok", ms = 6000) {
   setTimeout(() => node.remove(), ms);
 }
 
-function ask(title, text, value = "", okLabel = "OK") {
+function ask(title, text, value = "", okLabel = "OK", { secret = false } = {}) {
   return new Promise((resolve) => {
     const dlg = $("#prompt-dialog");
     $("#prompt-title").textContent = title;
     $("#prompt-text").textContent = text || "";
     $("#prompt-ok").textContent = okLabel;
     const input = $("#prompt-input");
+    input.type = secret ? "password" : "text";
+    input.autocomplete = secret ? "new-password" : "off";
     input.value = value;
     dlg.returnValue = "";
     const done = () => {
       dlg.removeEventListener("close", done);
-      resolve(dlg.returnValue === "ok" ? input.value.trim() : null);
+      // Passwords are taken as typed; everything else is trimmed.
+      const answer = dlg.returnValue === "ok" ? (secret ? input.value : input.value.trim()) : null;
+      input.value = "";
+      input.type = "text";
+      resolve(answer);
     };
     dlg.addEventListener("close", done);
     dlg.showModal();
@@ -209,6 +215,36 @@ function sectionTable(id) {
   return S.answer.doc[id];
 }
 
+/* ----------------------- hashing the root password -------------------- */
+
+/** Ask for a new root password twice, without echoing it. */
+async function askNewPassword() {
+  const first = await ask("Root password", "Typed here, hashed in this browser (SHA-512 crypt). Only the hash is sent.", "", "Next", { secret: true });
+  if (first === null) return null;
+  if (first === "") { toast("An empty root password is not allowed.", "bad"); return null; }
+  const again = await ask("Root password again", "Type it once more to confirm.", "", "Hash it", { secret: true });
+  if (again === null) return null;
+  if (again !== first) { toast("The two passwords did not match. Nothing changed.", "bad"); return null; }
+  return first;
+}
+
+/**
+ * Replace the global section's password with root-password-hashed, computed
+ * here, so the plaintext is never saved, stored or served. A comment on the
+ * old key moves with it.
+ */
+async function setHashedRootPassword(table, plain) {
+  if (typeof sha512crypt !== "function") { toast("Hashing is unavailable in this browser.", "bad"); return; }
+  const hash = await sha512crypt(plain);
+  table["root-password-hashed"] = hash;
+  const comments = commentsFor("global");
+  if (comments["root-password"] && !comments["root-password-hashed"]) comments["root-password-hashed"] = comments["root-password"];
+  if ("root-password" in table) { delete table["root-password"]; dropComment("global", "root-password"); }
+  markDirty();
+  renderAnswer();
+  toast("Set root-password-hashed. The plaintext is not saved; Save to keep the change.");
+}
+
 function renderSection(section) {
   const table = sectionTable(section.id);
   const wrap = el("div");
@@ -295,6 +331,25 @@ function renderSection(section) {
         vwrap.append(el("button", {
           text: "👁", title: "show/hide while typing",
           onclick: () => { control.type = control.type === "password" ? "text" : "password"; },
+        }));
+      }
+      if (section.id === "global" && key === "root-password") {
+        vwrap.append(el("button", {
+          text: "Hash it", title: "Replace with root-password-hashed, computed in this browser",
+          onclick: async () => {
+            const typed = table[key] !== MASK ? String(table[key] ?? "") : "";
+            const plain = typed || await askNewPassword();
+            if (plain) await setHashedRootPassword(table, plain);
+          },
+        }));
+      }
+      if (section.id === "global" && key === "root-password-hashed") {
+        vwrap.append(el("button", {
+          text: "Set from password…", title: "Type a password; only its hash is kept",
+          onclick: async () => {
+            const plain = await askNewPassword();
+            if (plain) await setHashedRootPassword(table, plain);
+          },
         }));
       }
     }

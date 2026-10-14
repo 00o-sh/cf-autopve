@@ -9,7 +9,7 @@
 
 import { keyDef } from "./schema";
 
-export type Format = "fqdn" | "domain" | "email" | "ip" | "cidr" | "url" | "fingerprint";
+export type Format = "fqdn" | "domain" | "email" | "ip" | "cidr" | "url" | "fingerprint" | "crypt";
 
 const LABEL = "[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?";
 const V4_OCTET = "(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
@@ -49,6 +49,11 @@ export const FORMATS: Record<Format, { pattern: string; hint: string }> = {
   fingerprint: {
     pattern: "^(?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}$",
     hint: "a SHA-256 fingerprint as 32 colon-separated hex pairs",
+  },
+  crypt: {
+    // Written verbatim into /etc/shadow: anything but a crypt(3) hash locks root out.
+    pattern: "^\\$(?:1|5|6|y|gy|7|2[abxy])\\$[^\\s:]+$",
+    hint: "a crypt(3) hash such as $6$… (use Hash it, or mkpasswd -m sha-512)",
   },
 };
 
