@@ -421,8 +421,23 @@ but it is never written to history. Older installers can put the token in the UR
 `/hook/deploy/<SERVE_TOKEN>`. The `Authorization` and `X-AutoPVE-Token` headers work here too.
 
 When the installer finishes, it POSTs its system information here; the Worker records it and forwards it
-to the relay target in the background (retries with backoff, delivery log per relay). The body is
-forwarded verbatim unless you give a template:
+to the relay target in the background, with a delivery log per relay. The body is forwarded verbatim
+unless you give a template (below).
+
+**Retries.** How retries run depends on whether a Queue is bound:
+
+- **With `RELAY_QUEUE` (recommended).** `/hook` puts the delivery on a Cloudflare Queue before it
+  replies `202`, so an accepted payload survives even if the target is down for minutes. Each attempt
+  runs in its own invocation. A failure backs off 10 s, 20 s, 40 s and so on (up to 5 minutes) until
+  the relay's retry count is used up. History shows `queued`, then `retrying` (with the next delay),
+  then `relayed` or `error`. The relay is looked up again on each attempt, so disabling or fixing it
+  affects deliveries already waiting. To enable it, run `npx wrangler queues create autopve-relay` and
+  uncomment the `[[queues.*]]` blocks in `wrangler.toml`.
+- **Without a queue.** Delivery runs inside the request's background window, which Workers cap at about
+  30 seconds. An attempt only starts if it can finish in time (25 s budget). When the budget runs out,
+  the delivery log says how many attempts ran and that it stopped, instead of the retries vanishing.
+  Payloads too large for a queue message (over about 100 KB) also take this path.
+
 
 ```json
 {"ref":"main","inputs":{"host":"{{ system_info.dmi.system.name }}","version":"{{ system_info.product.version }}"}}

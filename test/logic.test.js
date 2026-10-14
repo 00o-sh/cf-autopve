@@ -247,12 +247,14 @@ async function d1() {
   db.exec(readFileSync(new URL("../migrations/0001_init.sql", import.meta.url), "utf8"));
   return {
     raw: db,
-    prepare: (sql) => ({
-      bind: (...args) => ({
+    prepare: (sql) => {
+      const bound = (...args) => ({
         first: async () => db.prepare(sql).get(...args) ?? null,
         run: async () => db.prepare(sql).run(...args),
-      }),
-    }),
+        all: async () => ({ results: db.prepare(sql).all(...args) }),
+      });
+      return { bind: bound, ...bound() };
+    },
   };
 }
 
@@ -635,6 +637,106 @@ test("root-password-hashed must be a crypt hash: it goes verbatim into /etc/shad
   for (const bad of ["hunter2", "$6$has space", "$6$a:b", "$9$x"]) {
     assert.match(A.checkValue("global", "root-password-hashed", bad), /crypt\(3\) hash/, bad);
   }
+});
+
+/* ------------------------- relay delivery queue ------------------------ */
+
+async function relayEnv(relayFields = {}) {
+  const DB = await d1();
+  DB.raw.prepare(
+    "INSERT INTO relays (name, url, method, headers, hmac_secret, body_template, enabled, timeout_ms, retries, created_at, updated_at) VALUES (?, ?, 'POST', '{}', '', '', ?, ?, ?, 0, 0)",
+  ).run("deploy", "https://target.example/hook", relayFields.enabled ?? 1, relayFields.timeout_ms ?? 1000, relayFields.retries ?? 2);
+  DB.raw.prepare("INSERT INTO history (id, ts, kind, outcome, detail, system_info) VALUES (7, 0, 'hook', 'queued', '-> deploy', '{}')").run();
+  return { DB };
+}
+const historyRow = (env) => env.DB.raw.prepare("SELECT outcome, detail FROM history WHERE id = 7").get();
+const relayLog = (env) => env.DB.raw.prepare("SELECT attempt, ok, status, error FROM relay_log ORDER BY id").all().map((r) => ({ ...r }));
+
+function fakeMessage(attempts) {
+  const m = { body: { relay: "deploy", history_id: 7, payload: { a: 1 }, raw_body: '{"a":1}' }, attempts, acked: false, retried: null };
+  m.ack = () => { m.acked = true; };
+  m.retry = (opts) => { m.retried = opts ?? {}; };
+  return m;
+}
+
+async function withFetch(impl, fn) {
+  const real = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => { calls.push({ url: String(url), body: init.body }); return impl(calls.length); };
+  try { return await fn(calls); } finally { globalThis.fetch = real; }
+}
+
+test("queued delivery: success acks and marks the history row relayed", async () => {
+  const env = await relayEnv();
+  const msg = fakeMessage(1);
+  await withFetch(() => new Response("ok", { status: 200 }), async (calls) => {
+    await A.handleRelayBatch({ messages: [msg] }, env);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].body, '{"a":1}');
+  });
+  assert.equal(msg.acked, true);
+  assert.equal(msg.retried, null);
+  assert.deepEqual({ ...historyRow(env) }, { outcome: "relayed", detail: "-> deploy (HTTP 200, attempt 1)" });
+  assert.deepEqual(relayLog(env), [{ attempt: 1, ok: 1, status: 200, error: "" }]);
+});
+
+test("queued delivery: failures back off until the relay's retries are spent", async () => {
+  const env = await relayEnv({ retries: 2 });
+  await withFetch(() => new Response("nope", { status: 503 }), async () => {
+    const first = fakeMessage(1);
+    await A.handleRelayBatch({ messages: [first] }, env);
+    assert.deepEqual(first.retried, { delaySeconds: 10 });
+    assert.equal(historyRow(env).outcome, "retrying");
+    assert.match(historyRow(env).detail, /HTTP 503; retry 1 of 2 in 10s/);
+
+    const second = fakeMessage(2);
+    await A.handleRelayBatch({ messages: [second] }, env);
+    assert.deepEqual(second.retried, { delaySeconds: 20 });
+
+    const last = fakeMessage(3);
+    await A.handleRelayBatch({ messages: [last] }, env);
+    assert.equal(last.acked, true, "gives up instead of retrying forever");
+    assert.equal(last.retried, null);
+  });
+  assert.deepEqual({ ...historyRow(env) }, { outcome: "error", detail: "-> deploy failed after 3 attempt(s): HTTP 503" });
+  assert.deepEqual(relayLog(env).map((r) => r.attempt), [1, 2, 3], "every attempt is logged");
+});
+
+test("queued delivery: a relay disabled while a delivery waits is not called", async () => {
+  const env = await relayEnv({ enabled: 0 });
+  const msg = fakeMessage(2);
+  await withFetch(() => { throw new Error("must not be called"); }, async (calls) => {
+    await A.handleRelayBatch({ messages: [msg] }, env);
+    assert.equal(calls.length, 0);
+  });
+  assert.equal(msg.acked, true);
+  assert.match(historyRow(env).detail, /dropped: the relay was deleted or disabled/);
+});
+
+test("retry backoff doubles from 10s and caps at 5 minutes", () => {
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 9].map(A.retryDelaySeconds), [10, 20, 40, 80, 160, 300, 300]);
+});
+
+test("inline delivery stops, and says so, when the next attempt would not fit the time budget", async () => {
+  const env = await relayEnv({ retries: 5, timeout_ms: 10_000 });
+  const relay = await A.getRelay(env, "deploy");
+  // A target that hangs until the timeout: each attempt costs the full 10s on a fake clock.
+  const realNow = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  let result;
+  try {
+    result = await withFetch(() => { clock += 10_000; throw new Error("The operation was aborted due to timeout"); }, (calls) =>
+      A.deliver(env, relay, { a: 1 }, '{"a":1}', 7, 25_000).then((r) => ({ r, n: calls.length })));
+  } finally {
+    Date.now = realNow;
+  }
+  // 10s attempts in a 25s budget: at 10s the second fits (10 + 0.5 + 10 <= 25), at 20s a third would not.
+  assert.equal(result.n, 2);
+  assert.match(result.r.error, /stopped after 2 attempt\(s\): no time left .* Bind RELAY_QUEUE/);
+  const log = relayLog(env);
+  assert.equal(log.length, 3, "two attempts plus the stop notice");
+  assert.match(log[2].error, /stopped after 2/);
 });
 
 /* ------------------------------- relay ------------------------------- */

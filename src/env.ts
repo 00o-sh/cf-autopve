@@ -3,6 +3,8 @@ export interface Env {
   ASSETS: Fetcher;
   /** Optional: only needed for first-boot files larger than FILE_MAX_BYTES. */
   FILES?: R2Bucket;
+  /** Optional: durable, retried relay delivery (see relay.ts). Without it, delivery runs inline. */
+  RELAY_QUEUE?: Queue<import("./relay").RelayJob>;
 
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;

@@ -147,7 +147,7 @@ th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line
 th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: var(--panel-2); }
-td.ok { color: #9be7ad; } td.deny { color: #ff98a0; }
+td.ok { color: #9be7ad; } td.deny { color: #ff98a0; } td.pending { color: var(--warn); }
 
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 900px) { .split { grid-template-columns: 1fr; } main { flex-direction: column; } #sidebar { width: auto; flex: none; } }

@@ -942,6 +942,13 @@ function renderVersions() {
   return wrap;
 }
 
+/** served/relayed are done, queued/relaying/retrying are still in flight, the rest failed. */
+function outcomeClass(outcome) {
+  if (outcome === "served" || outcome === "relayed") return "ok";
+  if (outcome === "queued" || outcome === "relaying" || outcome === "retrying") return "pending";
+  return "deny";
+}
+
 function renderHistory() {
   const wrap = el("div");
   const detail = el("div", { class: "card", hidden: true });
@@ -970,7 +977,7 @@ function renderHistory() {
         el("td", { text: new Date(row.ts).toLocaleString() }),
         el("td", { text: row.system_name || "—" }),
         el("td", { text: row.answer || row.detail || "—" }),
-        el("td", { class: row.outcome === "served" || row.outcome === "relayed" ? "ok" : "deny", text: row.outcome }),
+        el("td", { class: outcomeClass(row.outcome), text: row.outcome }),
         el("td", { class: "mono", text: row.ip || "—" }),
       ]));
     }
