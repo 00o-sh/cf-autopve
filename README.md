@@ -98,7 +98,7 @@ npm ci                              # Node 22+ (see .nvmrc); installs exactly th
 
 # 1. database
 npx wrangler d1 create autopve                 # put the returned id in wrangler.toml
-npx wrangler d1 migrations apply autopve --remote
+npx wrangler d1 migrations apply autopve --remote   # re-run after upgrading: new migrations add tables
 
 # 2. encryption key (required before any credential can be stored)
 openssl rand -base64 32 | npx wrangler secret put ANSWER_ENC_KEY
@@ -193,6 +193,23 @@ History and see which answer would win and whether it would actually be served.
 > out is its serve mode, arm window and serve budget, its IP/CIDR allowlist, and the `SERVE_TOKEN`.
 > If two nodes must not be able to get each other's credentials, give each answer an allowlist and arm
 > it only while that node is installing.
+
+#### Versions: what changed, and undo
+
+Every save of an answer is kept as a version (the newest `ANSWER_VERSIONS_KEEP`, default 50, per
+answer). The **Versions** tab lists them with who saved and why (*save*, *created*, *copy of X*,
+*restore of #N*). Pick one to see the line diff of what it changed, or how the current state differs
+from it, and **Restore** it.
+
+- A restore goes through the same checks as a save and is recorded as a new version, so it can be
+  undone too. It brings back the document, priority, serve mode, allowlist and notes; it does not arm
+  the answer or acknowledge credentials for it.
+- The diff covers the answer's keys and comments, its filters, and its serving settings. Credentials
+  appear as `(stored credential 1a2b3c4d)`, a fingerprint of the ciphertext: you can see that a
+  password changed, never what it is. Versions store credentials encrypted, like the answer itself.
+- History follows renames and is removed with the answer. Answers saved before upgrading start their
+  history at the next save, which also records the state they had until then.
+- Versions need migration `0002`; without it answers still save, and the tab shows the error.
 
 #### Importing and editing as TOML
 
@@ -441,6 +458,7 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 | `FILE_MAX_BYTES` | `1000000` | largest file stored in D1 (D1's hard row limit is 2 MB) |
 | `HISTORY_MAX_BYTES` | `131072` | cap on stored `system_info` per history row |
 | `HISTORY_LIMIT` | `1000` | history rows retained |
+| `ANSWER_VERSIONS_KEEP` | `50` | saved versions kept per answer (Versions tab) |
 | `ANSWER_FORMAT` | `auto` | `auto`: JSON when the installer prefers it, else TOML; `toml`: always TOML |
 | `DEV_ALLOW_INSECURE_UI` | unset | local only; bypasses Access |
 | `ANSWER_ENC_KEY` | secret | base64 32-byte AES-256-GCM key; required to store any credential |
@@ -469,6 +487,7 @@ src/
   crypto.ts    AES-256-GCM envelope encryption, HMAC, token compare
   relay.ts     outbound webhook relay, templating, delivery log
   toml.ts      answer.toml writer + value coercion
+  versions.ts  answer version history: snapshots, diff text, restore
   tomlimport.ts  answer.toml reader for import and the raw editor (snake_case migration, comments)
   schema.ts    the Proxmox key catalogue (ported from settings.py)
   files.ts     D1/R2 file hosting + credential scanning

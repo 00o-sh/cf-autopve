@@ -170,3 +170,8 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 14px 0
 textarea.toml-edit { width: 100%; min-height: 420px; font-size: 13px; line-height: 1.45; tab-size: 2; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
 .warnlist { margin: 6px 0 0; padding-left: 18px; color: #ffe2a0; font-size: 13px; }
 .warnlist li { margin: 2px 0; }
+.diff span { display: block; min-height: 1.2em; }
+.diff .diff-add { color: #8fe3a8; background: rgba(46, 160, 67, 0.18); }
+.diff .diff-del { color: #ffadb3; background: rgba(248, 81, 73, 0.18); }
+.diff .diff-fold { color: var(--muted); font-style: italic; }
+td.bad { color: var(--bad); }

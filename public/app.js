@@ -152,7 +152,7 @@ async function openAnswer(name) {
   S.relay = null;
   S.dirty = false;
   S.tomlDraft = null;
-  S.tab = S.tab === "history" || S.tab === "preview" || S.tab === "serving" || S.tab === "filters" ? S.tab : "global";
+  S.tab = ["history", "preview", "serving", "filters", "versions"].includes(S.tab) ? S.tab : "global";
   if (S.answer.name === "Default" && S.tab === "filters") S.tab = "global";
   renderSidebar();
   renderAnswer();
@@ -180,7 +180,7 @@ function renderAnswer() {
   tabs.innerHTML = "";
   const defs = S.boot.schema.sections.map((s) => [s.id, s.label]);
   if (a.name !== "Default") defs.push(["filters", "Filters"]);
-  defs.push(["source", "Edit TOML"], ["serving", "Serving & risk"], ["preview", "answer.toml"], ["history", "History"]);
+  defs.push(["source", "Edit TOML"], ["serving", "Serving & risk"], ["preview", "answer.toml"], ["versions", "Versions"], ["history", "History"]);
   for (const [id, label] of defs) {
     tabs.append(el("button", {
       class: S.tab === id ? "active" : "",
@@ -196,6 +196,7 @@ function renderAnswer() {
   else if (S.tab === "source") body.append(renderSource());
   else if (S.tab === "serving") body.append(renderServing());
   else if (S.tab === "preview") body.append(renderPreview());
+  else if (S.tab === "versions") body.append(renderVersions());
   else if (S.tab === "history") body.append(renderHistory());
 }
 
@@ -779,6 +780,107 @@ function renderPreview() {
 }
 
 /* ------------------------------- history ----------------------------- */
+
+/* ------------------------------ versions ----------------------------- */
+
+/** Line diff by longest common subsequence: [[" " | "+" | "-", line], ...]. */
+function diffLines(a, b) {
+  const x = a.split("\n"), y = b.split("\n");
+  if (x.length * y.length > 4_000_000) return [...x.map((l) => ["-", l]), ...y.map((l) => ["+", l])];
+  const n = x.length, m = y.length;
+  const L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (x[i] === y[j]) { out.push([" ", x[i]]); i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) out.push(["-", x[i++]]);
+    else out.push(["+", y[j++]]);
+  }
+  while (i < n) out.push(["-", x[i++]]);
+  while (j < m) out.push(["+", y[j++]]);
+  return out;
+}
+
+/** The diff as a <pre>, unchanged runs folded down to a little context. */
+function diffView(ops) {
+  const pre = el("pre", { class: "toml diff" });
+  const CONTEXT = 3;
+  const changed = ops.map((o) => o[0] !== " ");
+  const near = (k) => changed.slice(Math.max(0, k - CONTEXT), k + CONTEXT + 1).some(Boolean);
+  if (!changed.some(Boolean)) { pre.textContent = "No differences."; return pre; }
+  let folded = 0;
+  const flush = () => { if (folded) pre.append(el("span", { class: "diff-fold", text: `  … ${folded} unchanged line${folded === 1 ? "" : "s"}` })); folded = 0; };
+  ops.forEach(([op, line], k) => {
+    if (op === " " && !near(k)) { folded++; return; }
+    flush();
+    pre.append(el("span", { class: op === "+" ? "diff-add" : op === "-" ? "diff-del" : "diff-same", text: `${op} ${line}` }));
+  });
+  flush();
+  return pre;
+}
+
+function renderVersions() {
+  const name = S.answer.name;
+  const wrap = el("div");
+  const list = el("tbody");
+  const detail = el("div", { class: "card", hidden: true });
+  wrap.append(
+    el("div", { class: "card" }, [
+      el("h3", { text: "Versions" }),
+      el("p", { class: "muted", style: "margin-top:0", text:
+        "Every save is kept (the newest 50 by default). Pick one to see what it changed, or restore it. Restoring saves it as a new version, " +
+        "so a restore can itself be undone. Credentials show as a fingerprint: you can see that one changed, not what it is." }),
+      el("table", {}, [el("thead", {}, [el("tr", {}, [
+        el("th", { text: "#" }), el("th", { text: "When" }), el("th", { text: "By" }), el("th", { text: "What" }),
+      ])]), list]),
+    ]),
+    detail,
+  );
+  const text = {};
+  const textOf = async (id) => (text[id] ??= (await api(`/answers/${encodeURIComponent(name)}/versions/${id}`)).text);
+
+  const show = async (versions, idx, against) => {
+    const v = versions[idx];
+    const base = against === "current" ? versions[0] : versions[idx + 1];
+    detail.hidden = false;
+    detail.innerHTML = "";
+    const mode = el("select", { "aria-label": "compare with" }, [
+      el("option", { value: "previous", text: "what this version changed (vs. the one before)", ...(against !== "current" ? { selected: true } : {}) }),
+      el("option", { value: "current", text: "how the newest version differs from this one", ...(against === "current" ? { selected: true } : {}) }),
+    ]);
+    mode.addEventListener("change", () => show(versions, idx, mode.value));
+    const restore = el("button", { class: "primary", text: `Restore #${v.id}`, disabled: idx === 0, onclick: async () => {
+      if (S.dirty && !confirm("Restoring discards your unsaved changes. Continue?")) return;
+      if (!confirm(`Restore "${name}" to version #${v.id} from ${new Date(v.created_at).toLocaleString()}?`)) return;
+      try {
+        const r = await api(`/answers/${encodeURIComponent(name)}/versions/${v.id}/restore`, { method: "POST", body: {} });
+        S.answer = r.answer; S.dirty = false;
+        await refreshAnswerList();
+        renderAnswer();
+        toast(r.problems?.length ? `Restored #${v.id}, but the installer would reject it: ${r.problems.join(" ")}` : `Restored #${v.id}.`, r.problems?.length ? "warn" : "ok", 12000);
+      } catch (err) { toast(err.message, "bad", 12000); }
+    } });
+    detail.append(
+      el("h3", { text: `#${v.id} — ${new Date(v.created_at).toLocaleString()} by ${v.created_by || "unknown"} (${v.reason})` }),
+      el("div", { style: "display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px" }, [mode, restore]),
+    );
+    const [from, to] = against === "current" ? [await textOf(v.id), await textOf(base.id)] : [base ? await textOf(base.id) : "", await textOf(v.id)];
+    if (!base && against !== "current") detail.append(el("p", { class: "muted", text: "The oldest version kept, shown in full." }));
+    detail.append(diffView(diffLines(from, to)));
+  };
+
+  api(`/answers/${encodeURIComponent(name)}/versions`).then(({ versions }) => {
+    if (!versions.length) list.append(el("tr", {}, [el("td", { colspan: "4", class: "muted", text: "No versions yet: the next save starts the history." })]));
+    versions.forEach((v, idx) => list.append(el("tr", { onclick: () => show(versions, idx, "previous") }, [
+      el("td", { text: `#${v.id}${idx === 0 ? " (current)" : ""}` }),
+      el("td", { text: new Date(v.created_at).toLocaleString() }),
+      el("td", { text: v.created_by }),
+      el("td", { text: v.reason }),
+    ])));
+  }).catch((err) => list.append(el("tr", {}, [el("td", { colspan: "4", class: "bad", text: err.message })])));
+  return wrap;
+}
 
 function renderHistory() {
   const wrap = el("div");

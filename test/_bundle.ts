@@ -11,3 +11,4 @@ export { emitJson, prefersJson } from "../src/toml";
 export { lintMerged } from "../src/answers";
 export { bodyTokenOk, tokenOk } from "../src/guards";
 export { parse as parseTomlRaw } from "smol-toml";
+export { recordVersion, listVersions, getVersion, renameVersions, deleteVersions, describeSnapshot } from "../src/versions";

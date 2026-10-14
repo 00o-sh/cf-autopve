@@ -14,6 +14,8 @@ export interface Env {
   FILE_MAX_BYTES?: string;
   HISTORY_MAX_BYTES?: string;
   HISTORY_LIMIT?: string;
+  /** Saved versions kept per answer (default 50). */
+  ANSWER_VERSIONS_KEEP?: string;
   /** "auto" (default): JSON when the installer prefers it, else TOML. "toml": always TOML. */
   ANSWER_FORMAT?: string;
 
