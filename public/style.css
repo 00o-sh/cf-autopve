@@ -167,3 +167,6 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 14px 0
 .url { font-family: var(--mono); font-size: 12px; background: #0b0f0d; border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; word-break: break-all; }
 .checkline { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 8px; }
 .checkline input[type=checkbox] { width: auto; margin-top: 3px; }
+textarea.toml-edit { width: 100%; min-height: 420px; font-size: 13px; line-height: 1.45; tab-size: 2; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+.warnlist { margin: 6px 0 0; padding-left: 18px; color: #ffe2a0; font-size: 13px; }
+.warnlist li { margin: 2px 0; }

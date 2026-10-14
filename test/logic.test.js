@@ -80,11 +80,46 @@ test("filters match on raw system information", () => {
   assert.equal(A.matches({}, raw), false, "an answer with no filters never matches");
 });
 
-test("normalisation enables NIC pinning only when a mapping exists", () => {
+test("a NIC mapping implies pinning; pinning can also be enabled on its own", () => {
   const withMap = A.normaliseDoc({ "network.interface-name-pinning.mapping": { "aa:bb:cc:dd:ee:ff": "nic0" } });
   assert.deepEqual(withMap["network.interface-name-pinning"], { enabled: true });
-  const without = A.normaliseDoc({ "network.interface-name-pinning": { enabled: true } });
-  assert.ok(!("network.interface-name-pinning" in without));
+  const enabledOnly = A.normaliseDoc({ "network.interface-name-pinning": { enabled: true } });
+  assert.deepEqual(enabledOnly["network.interface-name-pinning"], { enabled: true }, "nic0, nic1, ... naming");
+  assert.ok(!("network.interface-name-pinning.mapping" in enabledOnly));
+  const off = A.normaliseDoc({ "network.interface-name-pinning": { enabled: false } });
+  assert.ok(!("network.interface-name-pinning" in off));
+});
+
+test("keys the installer refuses together are rejected in one answer", () => {
+  assert.throws(() => A.normaliseDoc({ global: { "root-password": "a", "root-password-hashed": "$6$x" } }), /root-password and root-password-hashed/);
+  assert.throws(() => A.normaliseDoc({ global: { fqdn: "a.example.com", "fqdn.source": "from-dhcp" } }), /fqdn and fqdn.source/);
+  assert.throws(() => A.normaliseDoc({ network: { source: "from-dhcp", cidr: "10.0.0.5/24" } }), /from-dhcp.*cidr/);
+  assert.throws(() => A.normaliseDoc({ network: { source: "from-dhcp", "filter.ID_NET_NAME_MAC": "*bc" } }), /filter.ID_NET_NAME_MAC/);
+  assert.doesNotThrow(() => A.normaliseDoc({ network: { source: "from-answer", cidr: "10.0.0.5/24", "filter.ID_NET_NAME_MAC": "*bc" } }));
+});
+
+test("an answer's choice replaces Default's alternative instead of colliding with it", () => {
+  const def = {
+    global: { "root-password": "enc:v1:x:y", fqdn: "default.example.com" },
+    network: { source: "from-answer", cidr: "10.0.0.5/24", gateway: "10.0.0.1", "filter.ID_NET_NAME": "eno1" },
+  };
+  const merged = A.mergeDocs(def, {
+    global: { "root-password-hashed": "$6$abc", "fqdn.source": "from-dhcp" },
+    network: { source: "from-dhcp" },
+  });
+  assert.ok(!("root-password" in merged.global));
+  assert.equal(merged.global["root-password-hashed"], "$6$abc");
+  assert.ok(!("fqdn" in merged.global));
+  assert.equal(merged.global["fqdn.source"], "from-dhcp");
+  assert.deepEqual(merged.network, { source: "from-dhcp" });
+});
+
+test("PVE 9.x options are catalogued: subscription key and webhook auth token are credentials", () => {
+  assert.equal(A.isSecretKey("global", "subscription-key"), true);
+  assert.equal(A.isSecretKey("post-installation-webhook", "auth-token"), true);
+  assert.equal(A.checkValue("disk-setup", "zfs.compress", "lz4"), null);
+  assert.match(A.checkValue("disk-setup", "zfs.checksum", "md5"), /one of on, fletcher4, sha256/);
+  assert.equal(A.checkValue("disk-setup", "lvm.hdsize", 31.5), null, "sizes are GiB and may be fractional");
 });
 
 test("normalisation refuses a disk-list plus filter combination", () => {
@@ -195,6 +230,269 @@ test("the serve token is required when one is configured", () => {
   assert.equal(A.canServe(env, armed, { ...ctx, pathToken: "wrong" }).allowed, false);
   const withHeader = new Request("https://pve.example.com/answer", { method: "POST", headers: { "X-AutoPVE-Token": "s3cr3t" } });
   assert.equal(A.canServe(env, armed, { request: withHeader, ip: ctx.ip, pathToken: null }).allowed, true);
+});
+
+/* ------------------------- atomic serve claim ------------------------ */
+
+// A minimal D1 stand-in over node:sqlite, using the real migration, so the
+// claim's SQL is exercised as written.
+async function d1() {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readFileSync } = await import("node:fs");
+  const db = new DatabaseSync(":memory:");
+  db.exec(readFileSync(new URL("../migrations/0001_init.sql", import.meta.url), "utf8"));
+  return {
+    raw: db,
+    prepare: (sql) => ({
+      bind: (...args) => ({
+        first: async () => db.prepare(sql).get(...args) ?? null,
+        run: async () => db.prepare(sql).run(...args),
+      }),
+    }),
+  };
+}
+
+async function armedRow(DB, fields) {
+  const row = { serve_mode: "armed", armed_until: Date.now() + 60000, serves_remaining: 1, ...fields };
+  DB.raw.prepare("INSERT INTO answers (name, serve_mode, armed_until, serves_remaining, created_at, updated_at) VALUES ('node1', ?, ?, ?, 0, 0)")
+    .run(row.serve_mode, row.armed_until, row.serves_remaining);
+  return { ...baseAnswer, ...row };
+}
+
+const rowOf = (DB) => DB.raw.prepare("SELECT serve_mode, armed_until, serves_remaining FROM answers WHERE name = 'node1'").get();
+
+test("concurrent fetches against a one-serve arm get exactly one answer", async () => {
+  const DB = await d1();
+  const record = await armedRow(DB, { serves_remaining: 1 });
+  // Every request read the same snapshot and passed canServe…
+  assert.equal(A.canServe({}, record, ctx).allowed, true);
+  // …but only one may spend the serve.
+  const wins = (await Promise.all(Array.from({ length: 10 }, () => A.claimServe({ DB }, record)))).filter(Boolean);
+  assert.equal(wins.length, 1);
+  assert.deepEqual({ ...rowOf(DB) }, { serve_mode: "armed", armed_until: null, serves_remaining: 0 }, "last serve disarms");
+});
+
+test("a serve budget of N admits exactly N", async () => {
+  const DB = await d1();
+  const record = await armedRow(DB, { serves_remaining: 3 });
+  const wins = (await Promise.all(Array.from({ length: 8 }, () => A.claimServe({ DB }, record)))).filter(Boolean);
+  assert.equal(wins.length, 3);
+  assert.equal(rowOf(DB).serves_remaining, 0);
+});
+
+test("an unlimited arm keeps serving inside its window and stops after it", async () => {
+  const DB = await d1();
+  const until = Date.now() + 60000;
+  const record = await armedRow(DB, { serves_remaining: null, armed_until: until });
+  assert.equal(await A.claimServe({ DB }, record), true);
+  assert.equal(await A.claimServe({ DB }, record), true);
+  assert.deepEqual({ ...rowOf(DB) }, { serve_mode: "armed", armed_until: until, serves_remaining: null });
+  assert.equal(await A.claimServe({ DB }, record, until + 1), false);
+});
+
+test("a claim loses to a disarm or mode change made after the snapshot", async () => {
+  const DB = await d1();
+  const record = await armedRow(DB, { serves_remaining: 5 });
+  DB.raw.exec("UPDATE answers SET armed_until = NULL, serves_remaining = NULL");
+  assert.equal(await A.claimServe({ DB }, record), false);
+  DB.raw.exec(`UPDATE answers SET armed_until = ${Date.now() + 60000}, serve_mode = 'off'`);
+  assert.equal(await A.claimServe({ DB }, record), false);
+});
+
+test("always-mode answers need no claim", async () => {
+  assert.equal(await A.claimServe({ DB: null }, { ...baseAnswer, serve_mode: "always" }), true);
+});
+
+/* ------------------------------ hook guard ---------------------------- */
+
+test("relays are refused outright without a SERVE_TOKEN", () => {
+  const hook = new Request("https://pve.example.com/hook/deploy", { method: "POST" });
+  assert.match(A.hookAllowed({}, hook, null).reason, /disabled until a SERVE_TOKEN/);
+  assert.equal(A.hookAllowed({}, hook, "anything").allowed, false);
+  const env = { SERVE_TOKEN: "s3cr3t" };
+  assert.match(A.hookAllowed(env, hook, null).reason, /missing or incorrect/);
+  assert.equal(A.hookAllowed(env, hook, "wrong").allowed, false);
+  assert.equal(A.hookAllowed(env, hook, "s3cr3t").allowed, true);
+  const withHeader = new Request("https://pve.example.com/hook/deploy", { method: "POST", headers: { "X-AutoPVE-Token": "s3cr3t" } });
+  assert.equal(A.hookAllowed(env, withHeader, null).allowed, true);
+});
+
+/* ----------------------------- TOML import ---------------------------- */
+
+const UPSTREAM_EXAMPLE = `# provenance header, not attached to any key
+
+[global]
+keyboard = "de"
+country = "at"
+# the node's name
+fqdn = "pveauto.testinstall"
+root_password = "12345678"
+root-ssh-keys = ["ssh-ed25519 AAAA..."]
+subscription-key = "pve1c-0123456789"
+
+[network]
+source = "from-dhcp"
+
+[network.interface-name-pinning]
+enabled = true
+
+[network.interface-name-pinning.mapping]
+"24:8a:07:1e:05:bc" = "lan0"
+
+[disk_setup]
+filesystem = "zfs"
+zfs.raid = "raid1"
+zfs.arc_max = 2048
+# Kioxia only
+filter.ID_SERIAL = "KIOXIA*"
+
+[post-installation-webhook]
+url = "https://my.endpoint.local/postinst"
+auth-token = "secret-token"
+
+[first-boot]
+source = "from-iso"
+ordering = "before-network"
+
+[mystery]
+x = 1
+`;
+
+test("an existing answer.toml imports into the flat dotted-key model", () => {
+  const { doc, warnings } = A.parseAnswerToml(UPSTREAM_EXAMPLE);
+  assert.equal(doc.global.fqdn, "pveauto.testinstall");
+  assert.equal(doc.global["root-password"], "12345678", "snake_case renamed");
+  assert.equal(doc.global["subscription-key"], "pve1c-0123456789");
+  assert.deepEqual(doc.global["root-ssh-keys"], ["ssh-ed25519 AAAA..."]);
+  assert.deepEqual(doc["network.interface-name-pinning"], { enabled: true });
+  assert.deepEqual(doc["network.interface-name-pinning.mapping"], { "24:8a:07:1e:05:bc": "lan0" });
+  assert.equal(doc["disk-setup"]["zfs.raid"], "raid1");
+  assert.equal(doc["disk-setup"]["zfs.arc-max"], 2048);
+  assert.equal(doc["disk-setup"]["filter.ID_SERIAL"], "KIOXIA*", "udev property names keep their underscores");
+  assert.equal(doc["post-installation-webhook"]["auth-token"], "secret-token");
+  assert.equal(doc["first-boot"].ordering, "before-network");
+  assert.ok(!("mystery" in doc));
+  assert.ok(warnings.some((w) => /\[mystery\]/.test(w)));
+  assert.ok(warnings.some((w) => /root_password → global.root-password/.test(w)));
+  assert.ok(warnings.some((w) => /\[disk_setup\] → \[disk-setup\]/.test(w)));
+});
+
+test("comments directly above a key survive import; header comments do not attach", () => {
+  const { doc } = A.parseAnswerToml(UPSTREAM_EXAMPLE);
+  assert.deepEqual(doc.comments.global, { fqdn: "the node's name" });
+  assert.deepEqual(doc.comments["disk-setup"], { "filter.ID_SERIAL": "Kioxia only" });
+});
+
+test("fqdn written as a table imports as fqdn.source / fqdn.domain", () => {
+  const { doc } = A.parseAnswerToml(`[global]\nfqdn.source = "from-dhcp"\nfqdn.domain = "example.com"\n`);
+  assert.deepEqual(doc.global, { "fqdn.source": "from-dhcp", "fqdn.domain": "example.com" });
+  const inline = A.parseAnswerToml(`[global]\nfqdn = { source = "from-dhcp", domain = "example.com" }\n`).doc;
+  assert.deepEqual(inline.global, { "fqdn.source": "from-dhcp", "fqdn.domain": "example.com" });
+});
+
+test("import -> emit -> import is stable, including comments and the secret marker", () => {
+  const first = A.parseAnswerToml(UPSTREAM_EXAMPLE).doc;
+  first.global["root-password"] = A.MASK_MARKER;
+  const second = A.parseAnswerToml(A.emitToml(first)).doc;
+  assert.deepEqual(second, first);
+  // The marker then resolves to the stored ciphertext on save.
+  const restored = A.unmaskDoc(second, { global: { "root-password": "enc:v1:aa:bb" } });
+  assert.equal(restored.global["root-password"], "enc:v1:aa:bb");
+});
+
+test("broken TOML is refused with the parser's reason; invalid values still load for fixing", () => {
+  assert.throws(() => A.parseAnswerToml(`[global\nkeyboard = "de"`), /Not valid TOML/);
+  const { doc, warnings } = A.parseAnswerToml(`[global]\nkeyboard = "klingon"\n`);
+  assert.equal(doc.global.keyboard, "klingon");
+  assert.ok(warnings.some((w) => /global.keyboard is not a recognised value|must be one of/.test(w)));
+});
+
+/* ------------------------- token placements --------------------------- */
+
+const tokenReq = (headers = {}) => new Request("https://pve.example.com/answer", { method: "POST", headers });
+
+test("the installer's Authorization: Bearer <name>:<token> is accepted", () => {
+  const env = { SERVE_TOKEN: "s3cr3t" };
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Bearer autopve:s3cr3t" }), null), true);
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Bearer s3cr3t" }), null), true);
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "bearer node7:s3cr3t" }), null), true, "scheme is case-insensitive");
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Bearer autopve:wrong" }), null), false);
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Bearer :s3cr3t" }), null), false, "an empty name is not the <name>:<secret> form");
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Basic czNjcjN0" }), null), false);
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Bearer s3cr3t:autopve" }), null), false, "the token is the part after the name");
+});
+
+test("a webhook body token equal to SERVE_TOKEN authorises /hook without a URL token", () => {
+  const env = { SERVE_TOKEN: "s3cr3t" };
+  const hook = new Request("https://pve.example.com/hook/deploy", { method: "POST" });
+  assert.equal(A.hookAllowed(env, hook, null, "s3cr3t").allowed, true);
+  assert.equal(A.hookAllowed(env, hook, null, "receivers-own-token").allowed, false);
+  assert.equal(A.hookAllowed(env, hook, null, { not: "a string" }).allowed, false);
+  assert.match(A.hookAllowed({}, hook, null, "s3cr3t").reason, /disabled until a SERVE_TOKEN/, "a body token never stands in for having a SERVE_TOKEN");
+  assert.equal(A.bodyTokenOk({ SERVE_TOKEN: "s3cr3t" }, "s3cr3t"), true);
+  assert.equal(A.bodyTokenOk({}, ""), false);
+});
+
+/* --------------------------- merged answer ----------------------------- */
+
+const GOOD = {
+  global: { keyboard: "en-us", country: "us", fqdn: "pve1.example.com", mailto: "a@example.com", timezone: "UTC", "root-password-hashed": "$6$x" },
+  network: { source: "from-dhcp" },
+  "disk-setup": { filesystem: "zfs", "zfs.raid": "raid1", "disk-list": ["sda", "sdb"] },
+};
+
+test("a complete merged answer has no problems", () => {
+  assert.deepEqual(A.lintMerged(GOOD), []);
+});
+
+test("an answer that is fine alone can merge into one the installer rejects", () => {
+  const merged = A.mergeDocs(GOOD, { network: { cidr: "10.0.0.5/24" } });
+  assert.deepEqual(A.lintMerged(merged), ['network.source is "from-dhcp", so network.cidr must not be set.']);
+});
+
+test("missing required keys and mismatched filesystem options are reported", () => {
+  const problems = A.lintMerged({
+    global: { keyboard: "de" },
+    network: { source: "from-answer", cidr: "10.0.0.5/24" },
+    "disk-setup": { filesystem: "ext4", "zfs.raid": "raid1" },
+    "first-boot": { source: "from-url" },
+  });
+  const all = problems.join("\n");
+  for (const want of [/global.country is required/, /global.fqdn/, /root-password or global.root-password-hashed/,
+    /network.dns is required/, /network.gateway is required/, /disk-list or at least one filter/,
+    /zfs.\* options but filesystem = "ext4"/, /first-boot.url is required/]) {
+    assert.match(all, want);
+  }
+  assert.doesNotMatch(all, /zfs.raid is required/);
+});
+
+test("the stock Default answer is flagged for its missing root password", () => {
+  const def = { global: { keyboard: "en-us", country: "at", fqdn: "pveauto.testinstall", mailto: "mail@no.invalid", timezone: "Europe/Vienna" },
+    network: { source: "from-dhcp" }, "disk-setup": { filesystem: "zfs", "zfs.raid": "raid1", "disk-list": ["sda", "sdb"] } };
+  assert.deepEqual(A.lintMerged(def), ["Set one of global.root-password or global.root-password-hashed."]);
+});
+
+/* ------------------------------ JSON answers --------------------------- */
+
+test("the JSON answer is exactly what a TOML parser reads from the TOML answer", () => {
+  const doc = A.parseAnswerToml(UPSTREAM_EXAMPLE).doc;
+  const toml = A.emitToml(doc);
+  assert.deepEqual(A.emitJson(doc), JSON.parse(JSON.stringify(A.parseTomlRaw(toml))));
+  const json = A.emitJson(doc);
+  assert.equal(json["disk-setup"].zfs.raid, "raid1");
+  assert.equal(json["disk-setup"].filter.ID_SERIAL, "KIOXIA*");
+  assert.deepEqual(json.network["interface-name-pinning"], { enabled: true, mapping: { "24:8a:07:1e:05:bc": "lan0" } });
+  assert.ok(!("comments" in json) && !("must_contain" in json));
+});
+
+test("JSON only when the client prefers it", () => {
+  assert.equal(A.prefersJson(null), false, "no Accept header keeps TOML");
+  assert.equal(A.prefersJson("*/*"), false);
+  assert.equal(A.prefersJson("application/json"), true);
+  assert.equal(A.prefersJson("application/json, application/toml;q=0.9"), true);
+  assert.equal(A.prefersJson("application/toml, application/json;q=0.5"), false);
+  assert.equal(A.prefersJson("application/json;q=0"), false);
+  assert.equal(A.prefersJson("text/plain;q=0.8, application/json;q=0.8"), true, "a tie goes to JSON");
 });
 
 /* ------------------------------- relay ------------------------------- */

@@ -68,9 +68,18 @@ If you do host:
    acknowledgement (typing `HOST SECRETS`) on the Serving tab. That flag is per answer and recorded.
 3. **Armed windows.** Credential-bearing answers default to `serve_mode = "armed"`: they are refused
    until you arm them for N minutes and/or N serves. One install, one arm. `"always"` is rejected for
-   such answers unless `ALLOW_ALWAYS_SECRETS=true`.
-4. **Source restrictions.** Per-answer IP/CIDR allowlist, an optional deployment-wide `SERVE_TOKEN`
-   (`POST /answer/<token>` or the `X-AutoPVE-Token` header), and a per-IP rate limit.
+   such answers unless `ALLOW_ALWAYS_SECRETS=true`. The serve count is spent atomically in D1 *before*
+   anything is decrypted, so a burst of concurrent fetches against an answer armed for one serve gets
+   exactly one answer; the rest are refused and recorded.
+4. **Source restrictions.** Per-answer IP/CIDR allowlist, an optional deployment-wide `SERVE_TOKEN`,
+   and a per-IP rate limit. The token can be sent in any of these ways, best first:
+   - `Authorization: Bearer <name>:<token>`, which the installer sends when the ISO is built with
+     `--answer-auth-token` (PVE 9.2+)
+   - the `X-AutoPVE-Token` header
+   - a path segment, `POST /answer/<token>`, for older installers that only take a URL. This puts the
+     token in URLs and logs. The allowlist is
+   the only per-answer access control: **filters are for routing, not security** (see
+   [Answers](#answers)).
 5. **HTTPS required.** Credentials are never served over plain HTTP (`REQUIRE_HTTPS`, default on).
 6. **Nothing leaks into history.** Request history stores the response with credentials replaced by
    `REDACTED-BY-AUTOPVE`; the UI preview is redacted too. Revealing or downloading the real values is a
@@ -94,7 +103,7 @@ npx wrangler d1 migrations apply autopve --remote
 # 2. encryption key (required before any credential can be stored)
 openssl rand -base64 32 | npx wrangler secret put ANSWER_ENC_KEY
 
-# 3. optional: a token the installer must present
+# 3. a token the installer must present (optional for /answer and /files, required for relays)
 openssl rand -hex 24 | npx wrangler secret put SERVE_TOKEN
 
 # 4. deploy
@@ -165,6 +174,70 @@ the installer POSTs, and no *must not contain* string does. First match by `prio
 no match falls back to `Default`. The Filters tab has a dry-run box — paste a `system_info` payload from
 History and see which answer would win and whether it would actually be served.
 
+> **Filters are for routing, not security.** They match against the JSON the client POSTs, and the
+> client writes that JSON. Anyone who can reach `/answer` can claim any MAC address, serial number or
+> product name and so pick which answer they are offered. What actually stops an answer being handed
+> out is its serve mode, arm window and serve budget, its IP/CIDR allowlist, and the `SERVE_TOKEN`.
+> If two nodes must not be able to get each other's credentials, give each answer an allowlist and arm
+> it only while that node is installing.
+
+#### Importing and editing as TOML
+
+- **import** (sidebar) creates a new answer from an existing `answer.toml`.
+- **Edit TOML** (answer tab) shows the keys that answer sets as a plain `answer.toml`. Edit it, paste
+  over it, or *Load file…*, then *Apply to editor* and Save as usual. Every check that applies to the
+  form applies here too.
+
+Either way, the file is parsed with a real TOML parser and mapped onto the editor:
+
+- Deprecated `snake_case` keys (PVE 9.0+ warns about them) are renamed to kebab-case, for example
+  `root_password` → `root-password` and `[disk_setup]` → `[disk-setup]`. udev property names under
+  `filter.` keep their underscores.
+- A `# comment` line directly above a key is kept as that key's comment and written back out.
+- Sections and keys the installer doesn't understand are listed and dropped, not guessed at.
+- Stored credentials show as `__autopve_secret_set__`. Leave the marker to keep the stored value, or
+  replace it to set a new one; plaintext never comes back from the server.
+- An imported answer that holds credentials is switched to `armed` and still needs the acknowledgement
+  on the Serving tab before it saves.
+
+Filters (`must_contain` / `must_not_contain`) are configurator metadata, not part of the file, and are
+left as they are.
+
+#### Answer file coverage
+
+The key catalogue follows the current
+[Proxmox Automated Installation](https://pve.proxmox.com/wiki/Automated_Installation) reference,
+including `global.subscription-key` and `post-installation-webhook.auth-token` (PVE 9.2+, both treated
+as credentials), NIC name pinning with or without a MAC mapping (PVE 9.1+), and the documented udev
+filter properties for disks and NICs. Any other udev property also works as `filter.<NAME>`.
+
+Combinations the installer rejects are refused on save, with the reason:
+
+- `root-password` together with `root-password-hashed`
+- `fqdn` together with `fqdn.source` / `fqdn.domain`
+- `disk-list` together with a disk filter
+- `network.source = "from-dhcp"` together with `cidr`, `dns`, `gateway` or a NIC filter
+
+Across inheritance, whichever alternative an answer sets replaces Default's. For example, an answer
+using `root-password-hashed` drops Default's `root-password`, and one switching to `from-dhcp` drops
+Default's static addressing.
+
+#### What the installer will actually receive
+
+An answer can be valid on its own and still combine with Default into something the installer rejects.
+For example, an answer that adds a static `cidr` while Default says `from-dhcp`. The merged answer is
+checked against the installer's rules: required keys, exactly one root password, `from-answer`
+addressing, a disk selection, `zfs.raid`/`btrfs.raid`, filesystem-specific options, and first-boot and
+webhook URLs. Problems show on the **answer.toml** tab, after Save, and in the Filters dry run. A
+served request that would fail is noted in History. The check never blocks saving or serving: it
+tells you why an install would fail before you boot.
+
+#### JSON or TOML
+
+The installer advertises both in its `Accept` header and prefers JSON. `/answer` replies with JSON
+when the request prefers it, with the same structure a TOML parser reads from the TOML answer, and with
+TOML (as `text/plain`, as before) otherwise. Set `ANSWER_FORMAT = "toml"` to always send TOML.
+
 Point the installer at it by building an ISO with `scripts/build-iso.sh`. It downloads the PVE release
 (newest by default) from Proxmox, checks it against their `SHA256SUMS`, and runs
 `proxmox-auto-install-assistant prepare-iso` with your answer URL. When the assistant and `xorriso`
@@ -177,22 +250,129 @@ scripts/build-iso.sh --url https://autopve.example.com --version 9.2-1 --out /sr
 AUTOPVE_TOKEN=… scripts/build-iso.sh --url … --first-boot dns.sh    # bake a first-boot script in
 ```
 
-One ISO serves every node; rebuild only for a new PVE release or a new token. The token ends up inside
-the ISO, so treat the ISO as a secret. The equivalent manual command is:
+One ISO serves every node; rebuild only for a new PVE release or a new token. When the assistant
+supports `--answer-auth-token` (PVE 9.2+), the script uses it, so the token travels as an
+`Authorization` header and stays out of the URL. With an older assistant, or with `--token-in-url`,
+it goes in the URL path instead. Either way the token ends up inside the ISO, so treat the ISO as a
+secret. The equivalent manual command is:
 
 ```bash
-proxmox-auto-install-assistant prepare-iso pve.iso \
-  --fetch-from http --url https://autopve.example.com/answer/<SERVE_TOKEN>
+proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http \
+  --url https://autopve.example.com/answer --answer-auth-token "autopve:<SERVE_TOKEN>"
+# older assistants: --url https://autopve.example.com/answer/<SERVE_TOKEN>
 ```
+
+#### Running build-iso.sh without cloning the repo
+
+> **Don't pipe scripts from the internet into a shell, this one included, until you've read them.**
+> `curl … | bash` runs whatever the server sends at that moment, as you, with no chance to look
+> first. A compromised account, a hijacked DNS name or a man-in-the-middle all turn that one-liner into
+> someone else's code running on your jumpbox. Download it, read it, verify it, then run the file.
+
+The way to do it:
+
+```bash
+# 1. Pin a commit you (or someone you trust) reviewed, not a branch that can change under you.
+COMMIT=<full commit sha from github.com/00o-sh/cf-autopve/commits/main>
+curl -fsSLo build-iso.sh "https://raw.githubusercontent.com/00o-sh/cf-autopve/$COMMIT/scripts/build-iso.sh"
+
+# 2. Read it. All of it: it downloads an ISO, may start docker/podman, and writes under --out.
+less build-iso.sh
+
+# 3. Optionally record what you reviewed, and check it before later runs.
+sha256sum build-iso.sh
+
+# 4. Run the file you read.
+bash build-iso.sh --url https://autopve.example.com
+```
+
+The file is self-contained, including the `--bootstrap-range` hook (`--print-bootstrap-hook` prints it),
+so nothing else is fetched from this repo at run time.
+
+If you pipe it anyway (`curl -fsSL …/scripts/build-iso.sh | bash -s -- --url …`), the script stops
+before doing anything:
+
+- It explains that the code is unreviewed and asks `Run this unreviewed code now? [y/N]` on the
+  terminal.
+- Only `y` or `yes` continues. Enter, `n` or anything else stops it, with nothing downloaded or
+  written.
+- With no terminal to ask on (CI, cron, `ssh host 'curl … | bash'`), it refuses outright. Download
+  the file, review it and run that instead.
+- The whole script is one function called on its last line, so a download cut off part-way runs
+  nothing.
+
+The prompt is a speed bump, not a security control: by the time it shows, the code that prints it is
+already running. Reviewing the file is the control.
+
+### Networks without DHCP
+
+The installer has to be online before it can fetch an answer. In HTTP mode it
+gets online only through DHCP; Proxmox offers no setting for a static address
+at that point. `build-iso.sh` can add one:
+
+```bash
+scripts/build-iso.sh --url https://autopve.example.com \
+  --bootstrap-range 10.0.0.240-10.0.0.249/24 --bootstrap-gateway 10.0.0.1 [--bootstrap-dns 10.0.0.1,1.1.1.1]
+```
+
+What happens at boot:
+
+1. The installer tries DHCP as usual, for about 10 seconds. If DHCP answers, nothing else changes, so
+   the same ISO works on DHCP networks too.
+2. If nothing answers, a `dhclient` exit hook added by the build takes an address from the bootstrap
+   range:
+   - It starts at a slot derived from the NIC's MAC address, so several machines booting at once
+     spread across the range.
+   - It skips any address that answers ARP.
+   - It keeps the address only if the gateway answers on that NIC. A NIC cabled to some other
+     network is left alone.
+3. The installer fetches its answer over HTTP as normal and installs.
+4. The installed system gets the network from **that machine's answer**, not the bootstrap address.
+   Give each machine:
+
+   ```toml
+   [network]
+   source = "from-answer"
+   cidr = "10.0.0.21/24"
+   gateway = "10.0.0.1"
+   dns = "10.0.0.1"
+   filter.ID_NET_NAME_MAC = "*248a071e05bc"   # which NIC, on multi-NIC machines
+   ```
+
+   `source = "from-dhcp"` would make the installer write the bootstrap address as the machine's
+   permanent configuration.
+
+How it is added: Proxmox's tooling has no hook for this. The build appends a small archive to the
+ISO's initrd. The archive holds the hook, its config, and a copy of the initrd's `/init` with one
+added line that copies them into the installer's root before it starts. The kernel unpacks appended
+archives after the original, so the stock initrd is otherwise untouched. The ISO is updated in place
+the same way `prepare-iso` does it, keeping its boot records and volume UUID. If a future Proxmox ISO
+changes that part of `/init`, the build stops with an error rather than producing a broken ISO.
+
+`test/iso-bootstrap.sh <iso>` (root, network namespaces) runs the hook with that ISO's own
+`dhclient-script`, `dhclient.conf` and busybox, on a fake LAN with no DHCP server.
 
 ### Post-installation webhook relay
 
-Create a relay, then set it in the answer's **Post Install** section:
+Relays need a `SERVE_TOKEN`. A relay fires real automation, and `/hook` has no arm window or allowlist,
+so without a token anyone who guessed a relay name could trigger it with a payload of their choosing,
+signed with your HMAC secret. While no token is configured, every `/hook` call is refused with
+`403 relays are disabled until a SERVE_TOKEN is configured`.
+
+Create a relay, then set it in the answer's **Post Install** section. Set `auth-token` to the
+`SERVE_TOKEN` (PVE 9.2+). The installer sends it as a top-level `token` field in the JSON body, so it
+stays out of the URL:
 
 ```toml
 [post-installation-webhook]
 url = "https://autopve.example.com/hook/deploy"
+auth-token = "<SERVE_TOKEN>"
 ```
+
+The Worker removes that `token` field before relaying the payload, so your automation never sees the
+serve token. A different `auth-token` value is taken to be the receiver's own and is passed through,
+but it is never written to history. Older installers can put the token in the URL instead:
+`/hook/deploy/<SERVE_TOKEN>`. The `Authorization` and `X-AutoPVE-Token` headers work here too.
 
 When the installer finishes, it POSTs its system information here; the Worker records it and forwards it
 to the relay target in the background (retries with backoff, delivery log per relay). The body is
@@ -248,9 +428,10 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 | `FILE_MAX_BYTES` | `1000000` | largest file stored in D1 (D1's hard row limit is 2 MB) |
 | `HISTORY_MAX_BYTES` | `131072` | cap on stored `system_info` per history row |
 | `HISTORY_LIMIT` | `1000` | history rows retained |
+| `ANSWER_FORMAT` | `auto` | `auto`: JSON when the installer prefers it, else TOML; `toml`: always TOML |
 | `DEV_ALLOW_INSECURE_UI` | unset | local only; bypasses Access |
 | `ANSWER_ENC_KEY` | secret | base64 32-byte AES-256-GCM key; required to store any credential |
-| `SERVE_TOKEN` | secret | optional token the installer must present |
+| `SERVE_TOKEN` | secret | token the installer must present; optional for `/answer` and `/files`, required for `/hook` (relays are refused without it) |
 
 ## Endpoints
 
@@ -258,8 +439,8 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 |---|---|---|
 | `GET /` | Access | configurator UI |
 | `/api/*` | Access | configurator API |
-| `POST /answer[/<token>]` | guards | installer fetches its answer file |
-| `POST /hook/<relay>[/<token>]` | guards | post-installation webhook → relay |
+| `POST /answer[/<token>]` | guards | installer fetches its answer file (TOML, or JSON when preferred) |
+| `POST /hook/<relay>[/<token>]` | `SERVE_TOKEN` (required: body `token`, header, or path) | post-installation webhook → relay |
 | `GET /files/<name>[?t=<token>]` | guards | first-boot scripts and downloads |
 | `GET /healthz` | none | liveness |
 
@@ -271,10 +452,11 @@ src/
   api.ts       Access-gated JSON API for the UI
   access.ts    Cloudflare Access JWT verification (JWKS, iss/aud/exp)
   answers.ts   storage, inheritance, filter matching, masking
-  guards.ts    serve decisions: mode, arm window, CIDR, token, HTTPS
+  guards.ts    serve decisions: mode, arm window, CIDR, token, HTTPS; atomic serve claim
   crypto.ts    AES-256-GCM envelope encryption, HMAC, token compare
   relay.ts     outbound webhook relay, templating, delivery log
   toml.ts      answer.toml writer + value coercion
+  tomlimport.ts  answer.toml reader for import and the raw editor (snake_case migration, comments)
   schema.ts    the Proxmox key catalogue (ported from settings.py)
   files.ts     D1/R2 file hosting + credential scanning
   db.ts        history, audit, rate limiting, sysinfo key learning

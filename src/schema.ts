@@ -99,6 +99,29 @@ const GLOBAL: Record<string, KeyDef> = {
       "Optional. Specifies whether the target machine should be rebooted or powered off after a successful installation. Options are reboot (default) and power-off.",
     options: ["reboot", "power-off"],
   },
+  "subscription-key": {
+    description:
+      "Optional (PVE 9.2+). A Proxmox VE, Backup Server or Mail Gateway subscription key, staged during the install and activated on first boot once the network is up. Implies installing proxmox-first-boot. Treated as a credential.",
+    type: "str",
+    secret: true,
+  },
+};
+
+/** Useful udev properties for picking the NIC (any udev property works as filter.<NAME>). */
+const NIC_FILTERS: Record<string, KeyDef> = {
+  "filter.ID_NET_NAME_MAC": { description: "Match the NIC by its MAC-based name, e.g. enx248a071e05bc. Globs * ? [abc] [!a] are allowed. Only the first matching NIC is used." },
+  "filter.ID_NET_NAME": { description: "Match the NIC by its predictable interface name, e.g. enp1s0*. Globs allowed. Only the first matching NIC is used." },
+  "filter.ID_VENDOR_FROM_DATABASE": { description: "Match the NIC by vendor name from the hwdb, e.g. Intel*. Globs allowed." },
+  "filter.ID_MODEL_FROM_DATABASE": { description: "Match the NIC by model name from the hwdb, e.g. *X710*. Globs allowed." },
+};
+
+/** Useful udev properties for picking disks (any udev property works as filter.<NAME>). */
+const DISK_FILTERS: Record<string, KeyDef> = {
+  "filter.DEVNAME": { description: "Match disks by device node, e.g. /dev/nvme*. Globs * ? [abc] [!a] are allowed. Cannot be combined with disk-list." },
+  "filter.ID_SERIAL": { description: "Match disks by full serial, e.g. KIOXIA_KCMYXVUG1T60*. Globs allowed. Cannot be combined with disk-list." },
+  "filter.ID_SERIAL_SHORT": { description: "Match disks by short serial number. Globs allowed. Cannot be combined with disk-list." },
+  "filter.ID_MODEL": { description: "Match disks by model, e.g. Samsung SSD 870*. Globs allowed. Cannot be combined with disk-list." },
+  "filter.ID_WWN": { description: "Match disks by World Wide Name, e.g. eui.0100*. Globs allowed. Cannot be combined with disk-list." },
 };
 
 const NETWORK: Record<string, KeyDef> = {
@@ -109,16 +132,16 @@ const NETWORK: Record<string, KeyDef> = {
   cidr: { description: "The IP address in CIDR notation. For example, 192.168.1.10/24.", format: "cidr" },
   dns: { description: "The IP address of the DNS server.", format: "ip" },
   gateway: { description: "The IP address of the default gateway.", format: "ip" },
-  "filter.ID_NET_NAME_MAC": { description: "Filter against the ID_NET_NAME_MAC property to select the network card. See filters." },
+  ...NIC_FILTERS,
 };
 
 const DISK: Record<string, KeyDef> = {
-  filesystem: { description: "One of the following options: ext4, xfs, zfs, or btrfs.", options: ["ext4", "xfs", "zfs", "btrfs"] },
+  filesystem: { description: "One of ext4, xfs, zfs or btrfs (btrfs is Proxmox VE only). zfs.*, lvm.* and btrfs.* options apply to the matching filesystem.", options: ["ext4", "xfs", "zfs", "btrfs"] },
   "disk-list": {
     description: 'List of disks to use. Useful if you are sure about the disk names. For example: disk-list = ["sda", "sdb"].',
     type: "list",
   },
-  filter: { description: "Filter against UDEV properties to select the disks for the installation. See filters." },
+  ...DISK_FILTERS,
   "filter-match": {
     description:
       'Can be "any" or "all". Decides if a match of any filter is enough of if all filters need to match for a disk to be selected. Default is "any".',
@@ -135,11 +158,17 @@ const DISK: Record<string, KeyDef> = {
   },
   "zfs.arc-max": {
     description:
-      "Defines the maximum size the ARC can grow to and thus limits the amount of memory ZFS will use. See also the section on how to limit ZFS memory usage for more details.",
+      "Maximum size of the ZFS ARC in MiB, which limits how much memory ZFS will use. See 'Limit ZFS Memory Usage' in the PVE admin guide.",
     type: "int",
   },
-  "zfs.checksum": { description: "Defines which checksumming algorithm should be used for rpool." },
-  "zfs.compress": { description: "Defines whether compression is enabled for rpool." },
+  "zfs.checksum": {
+    description: "Optional. The checksumming algorithm for rpool: on (default), fletcher4 or sha256.",
+    options: ["on", "fletcher4", "sha256"],
+  },
+  "zfs.compress": {
+    description: "Optional. Whether compression is enabled for rpool and which algorithm: on (default), off, lzjb, lz4, zle, gzip or zstd.",
+    options: ["on", "off", "lzjb", "lz4", "zle", "gzip", "zstd"],
+  },
   "zfs.copies": {
     description:
       "Defines the copies parameter for rpool. Check the zfs(8) manpage for the semantics, and why this does not replace redundancy on disk-level.",
@@ -147,35 +176,35 @@ const DISK: Record<string, KeyDef> = {
   },
   "zfs.hdsize": {
     description:
-      "Defines the total hard disk size to be used. This is useful to save free space on the hard disk(s) for further partitioning (for example to create a swap-partition). hdsize is only honored for bootable disks, that is only the first disk or mirror for RAID0, RAID1 or RAID10, and all disks in RAID-Z[123].",
+      "Total disk size to use, in GiB (decimals allowed). Leaves free space for further partitioning, e.g. a swap partition. Only honored for bootable disks: the first disk or mirror for RAID0, RAID1 or RAID10, and all disks in RAID-Z[123].",
     type: "int",
   },
   "lvm.hdsize": {
     description:
-      "Defines the total hard disk size to be used. This way you can reserve free space on the hard disk for further partitioning (for example for an additional PV and VG on the same hard disk that can be used for LVM storage).",
+      "Total disk size to use, in GiB (decimals allowed). Reserves free space for further partitioning, e.g. an additional PV and VG for LVM storage.",
     type: "int",
   },
   "lvm.swapsize": {
     description:
-      "Defines the size of the swap volume. The default is the size of the installed memory, minimum 4 GB and maximum 8 GB. The resulting value cannot be greater than hdsize/8.",
+      "Size of the swap volume in GiB. Defaults to the installed memory, clamped to 4–8 GiB, and cannot exceed hdsize/8.",
     type: "int",
   },
   "lvm.maxroot": {
-    description: "Defines the maximum size of the root volume, which stores the operation system. The maximum limit of the root volume size is hdsize/4.",
+    description: "Maximum size of the root volume in GiB. Limited to hdsize/4 (half the remaining space below 48 GiB free, unlimited below 12 GiB).",
     type: "int",
   },
   "lvm.maxvz": {
     description:
-      "Defines the maximum size of the data volume. The actual size of the data volume is: datasize = hdsize - rootsize - swapsize - minfree Where datasize cannot be bigger than maxvz.",
+      "Maximum size of the data volume in GiB. The data volume is hdsize - rootsize - swapsize - minfree, capped at maxvz.",
     type: "int",
   },
   "lvm.minfree": {
     description:
-      "Defines the amount of free space that should be left in the LVM volume group pve. With more than 128GB storage available, the default is 16GB, otherwise hdsize/8 will be used.",
+      "Free space to leave in the pve volume group, in GiB. Defaults to 16 GiB with more than 128 GiB of storage, otherwise hdsize/8.",
     type: "int",
   },
   "btrfs.raid": { description: "The RAID level that should be used. Options are raid0, raid1, and raid10", options: ["raid0", "raid1", "raid10"] },
-  "btrfs.hdsize": { description: "Defines the total hard disk size to be used.", type: "int" },
+  "btrfs.hdsize": { description: "Total disk size to use, in GiB (decimals allowed).", type: "int" },
   "btrfs.compress": {
     description: "The compression type to use. Possible options are on, off, zlib, lzo and zstd. Defaults to off. See also the btrfs(5) manpage.",
     options: ["on", "off", "zlib", "lzo", "zstd"],
@@ -189,6 +218,12 @@ const POST_INSTALL: Record<string, KeyDef> = {
     format: "url",
   },
   "cert-fingerprint": { description: "Optional. SHA256 certificate fingerprint if certificate pinning should be used.", format: "fingerprint" },
+  "auth-token": {
+    description:
+      "Optional (PVE 9.2+). An opaque token the installer adds as a top-level \"token\" field in the webhook's JSON body, so the receiver can authenticate the callback. Treated as a credential.",
+    type: "str",
+    secret: true,
+  },
 };
 
 const FIRST_BOOT: Record<string, KeyDef> = {
@@ -215,7 +250,7 @@ export const SECTIONS: SectionDef[] = [
     label: "NIC Pinning",
     keys: {},
     freeform: true,
-    help: "Map a MAC address to the interface name it should be pinned to. Enabling this writes [network.interface-name-pinning] enabled = true.",
+    help: "Pin NIC names (PVE 9.1+). With pinning enabled and no mapping, the installer names every NIC nic0, nic1, …; map a MAC address here to choose a name yourself. A mapping implies enabled = true.",
   },
   { id: "disk-setup", label: "Disk", keys: DISK },
   { id: "post-installation-webhook", label: "Post Install", keys: POST_INSTALL },

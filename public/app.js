@@ -99,7 +99,7 @@ function renderBanners() {
   }
   if (!c.serve_token_configured) {
     box.append(el("div", { class: "banner info", text:
-      "No SERVE_TOKEN is set, so /answer is reachable by anyone who knows the hostname. Answers holding credentials still require arming, but a token narrows the exposure further." }));
+      "No SERVE_TOKEN is set, so /answer is reachable by anyone who knows the hostname and webhook relays are disabled (/hook refuses every call). Answers holding credentials still require arming, but a token narrows the exposure further." }));
   }
 }
 
@@ -151,6 +151,7 @@ async function openAnswer(name) {
   S.answer = data.answer;
   S.relay = null;
   S.dirty = false;
+  S.tomlDraft = null;
   S.tab = S.tab === "history" || S.tab === "preview" || S.tab === "serving" || S.tab === "filters" ? S.tab : "global";
   if (S.answer.name === "Default" && S.tab === "filters") S.tab = "global";
   renderSidebar();
@@ -179,7 +180,7 @@ function renderAnswer() {
   tabs.innerHTML = "";
   const defs = S.boot.schema.sections.map((s) => [s.id, s.label]);
   if (a.name !== "Default") defs.push(["filters", "Filters"]);
-  defs.push(["serving", "Serving & risk"], ["preview", "answer.toml"], ["history", "History"]);
+  defs.push(["source", "Edit TOML"], ["serving", "Serving & risk"], ["preview", "answer.toml"], ["history", "History"]);
   for (const [id, label] of defs) {
     tabs.append(el("button", {
       class: S.tab === id ? "active" : "",
@@ -192,6 +193,7 @@ function renderAnswer() {
   const section = S.boot.schema.sections.find((s) => s.id === S.tab);
   if (section) body.append(renderSection(section));
   else if (S.tab === "filters") body.append(renderFilters());
+  else if (S.tab === "source") body.append(renderSource());
   else if (S.tab === "serving") body.append(renderServing());
   else if (S.tab === "preview") body.append(renderPreview());
   else if (S.tab === "history") body.append(renderHistory());
@@ -232,9 +234,22 @@ function renderSection(section) {
     markDirty(); renderAnswer();
   };
 
+  let pinToggle = null;
+  if (section.id === "network.interface-name-pinning.mapping") {
+    const pinning = sectionTable("network.interface-name-pinning");
+    const box = el("input", {
+      type: "checkbox", id: "pin-enabled",
+      checked: pinning.enabled === true || Object.keys(table).length > 0,
+      disabled: Object.keys(table).length > 0,
+      onchange: (e) => { if (e.target.checked) pinning.enabled = true; else delete pinning.enabled; markDirty(); },
+    });
+    pinToggle = el("div", { class: "checkline" }, [box, el("label", { for: "pin-enabled", text: "Enable interface name pinning" + (Object.keys(table).length ? " (implied by the mapping below)" : "") })]);
+  }
+
   wrap.append(el("div", { class: "card" }, [
     el("h3", { text: section.label + "  " }),
     section.help ? el("p", { class: "muted", text: section.help, style: "margin-top:0" }) : null,
+    pinToggle,
     el("div", { class: "adder" }, [el("div", {}, [input, datalist, hint]), el("button", { text: "Add key", onclick: add })]),
   ]));
 
@@ -243,7 +258,7 @@ function renderSection(section) {
   if (!entries.length) rows.append(el("p", { class: "muted", text: "Nothing set in this section." }));
   for (const [key, value] of entries) {
     const def = section.keys[key] || {};
-    const isSecret = !!def.secret || /(^|[-_.])(password|passwd|secret|token|api[-_]?key|private[-_]?key)([-_.]|$)/i.test(key);
+    const isSecret = isSecretField(section.id, key);
     const stored = value === MASK;
     const err = el("div", { class: "fielderr" });
     const showProblem = (v) => {
@@ -514,7 +529,8 @@ function renderFilters() {
       let parsed;
       try { parsed = JSON.parse(ta.value || "{}"); } catch { return toast("That is not valid JSON.", "bad"); }
       const r = await api("/match", { method: "POST", body: { system_info: parsed } });
-      out.textContent = `matched: ${r.matched}\nwould serve: ${r.would_serve}${r.reason ? " — " + r.reason : ""}\n\n${r.toml || ""}`;
+      const issues = r.problems?.length ? `\ninstaller would reject it:\n${r.problems.map((p) => "  - " + p).join("\n")}\n` : "";
+      out.textContent = `matched: ${r.matched}\nwould serve: ${r.would_serve}${r.reason ? " — " + r.reason : ""}\n${issues}\n${r.toml || ""}`;
     },
   })]), out);
   const col = el("div", { style: "grid-column: 1 / -1" }, [tester]);
@@ -600,13 +616,16 @@ function renderServing() {
     el("label", { class: "field" }, [el("span", { text: "Notes" }), notes]),
   ]));
 
-  const answerUrl = `${c.origin}/answer` + (c.serve_token_configured ? "/<SERVE_TOKEN>" : "");
+  const answerUrl = `${c.origin}/answer`;
+  const tokenArgs = c.serve_token_configured ? ` --answer-auth-token "autopve:<SERVE_TOKEN>"` : "";
   wrap.append(el("div", { class: "card" }, [
     el("h3", { text: "Installer endpoints" }),
-    el("p", { class: "muted", text: "Point the installer's answer fetch at this URL" + (c.serve_token_configured ? ", replacing <SERVE_TOKEN> with your token's value." : ".") }),
+    el("p", { class: "muted", text: "Point the installer's answer fetch at this URL" + (c.serve_token_configured
+      ? ". The installer sends the token as an Authorization header (prepare-iso --answer-auth-token, PVE 9.2+); older assistants can put it in the URL instead: " + answerUrl + "/<SERVE_TOKEN>."
+      : ".") }),
     el("div", { class: "url", text: answerUrl }),
-    el("p", { class: "muted", style: "margin-bottom:4px", text: "Build a matching ISO with scripts/build-iso.sh from the repo (downloads and verifies the PVE release, works on any jumpbox with docker or podman), or by hand:" }),
-    el("div", { class: "url", text: `proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http --url "${answerUrl}"` }),
+    el("p", { class: "muted", style: "margin-bottom:4px", text: "Build a matching ISO with scripts/build-iso.sh from the repo (downloads and verifies the PVE release, works on any jumpbox with docker or podman, and picks the header or URL form for you), or by hand:" }),
+    el("div", { class: "url", text: `proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http --url "${answerUrl}"${tokenArgs}` }),
     el("p", { class: "muted", text:
       "This one URL serves every answer. The installer posts its hardware details; the first answer (by match priority) " +
       "whose Filters match is returned, layered over Default. If none match, Default is served." }),
@@ -614,18 +633,137 @@ function renderServing() {
   return wrap;
 }
 
+/* ------------------------------ raw TOML ----------------------------- */
+
+const SECRET_KEY_RE = /(^|[-_.])(password|passwd|secret|token|api[-_]?key|private[-_]?key)([-_.]|$)/i;
+
+/** Mirrors isSecretKey() in src/schema.ts. */
+function isSecretField(sectionId, key) {
+  const def = S.boot.schema.sections.find((s) => s.id === sectionId)?.keys?.[key];
+  return !!def?.secret || SECRET_KEY_RE.test(key);
+}
+
+function docHoldsSecrets(doc) {
+  return S.boot.schema.order.some((sec) =>
+    Object.entries(doc[sec] || {}).some(([k, v]) => v !== "" && v !== null && v !== undefined && isSecretField(sec, k)));
+}
+
+/**
+ * Replace the editor's document with a parsed one, keeping the answer's
+ * filters. Returns notes for the user about settings that had to change.
+ */
+function applyParsedDoc(parsed) {
+  const old = S.answer.doc;
+  const comments = { ...(parsed.comments || {}) };
+  for (const scope of ["must_contain", "must_not_contain"]) if (old.comments?.[scope]) comments[scope] = old.comments[scope];
+  S.answer.doc = { ...parsed, must_contain: old.must_contain || [], must_not_contain: old.must_not_contain || [], comments };
+  markDirty();
+  const notes = [];
+  if (docHoldsSecrets(S.answer.doc)) {
+    if (S.answer.serve_mode === "always" && !S.boot.config.allow_always_secrets) {
+      S.answer.serve_mode = "armed";
+      notes.push('It holds credentials, so its serve mode was switched from "always" to "armed".');
+    }
+    if (!S.answer.secrets_ack) notes.push("Acknowledge credential hosting on the Serving & risk tab before saving.");
+  }
+  return notes;
+}
+
+function warningList(warnings) {
+  if (!warnings || !warnings.length) return null;
+  return el("ul", { class: "warnlist" }, warnings.map((w) => el("li", { text: w })));
+}
+
+function renderSource() {
+  const a = S.answer;
+  const area = el("textarea", {
+    class: "toml-edit", spellcheck: "false", rows: "24", "aria-label": "answer.toml source",
+    oninput: (e) => { S.tomlDraft = e.target.value; status.textContent = "edited — not applied yet"; },
+  });
+  const status = el("span", { class: "muted" });
+  const notes = el("div");
+  const load = async () => {
+    const r = await api("/toml/render", { method: "POST", body: { doc: a.doc } });
+    area.value = r.toml;
+    S.tomlDraft = null;
+    status.textContent = "";
+    notes.innerHTML = "";
+  };
+  if (S.tomlDraft !== null && S.tomlDraft !== undefined) { area.value = S.tomlDraft; status.textContent = "edited — not applied yet"; }
+  else load();
+
+  const apply = async () => {
+    try {
+      const r = await api("/toml/parse", { method: "POST", body: { toml: area.value } });
+      const extra = applyParsedDoc(r.doc);
+      S.tomlDraft = null;
+      notes.innerHTML = "";
+      const all = [...(r.warnings || []), ...extra];
+      const w = warningList(all);
+      if (w) notes.append(el("p", { class: "muted", text: "Applied, with notes:" }), w);
+      toast("Applied to the editor. Review the tabs, then Save.", all.length ? "warn" : "ok");
+      $("#answer-save").textContent = "Save •";
+      status.textContent = "applied — not saved yet";
+    } catch (err) {
+      toast(err.message, "bad", 12000);
+    }
+  };
+  const fileInput = el("input", {
+    type: "file", accept: ".toml,text/plain,application/toml", hidden: true,
+    onchange: async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      area.value = await f.text();
+      S.tomlDraft = area.value;
+      status.textContent = `loaded ${f.name} — not applied yet`;
+      e.target.value = "";
+    },
+  });
+
+  return el("div", { class: "card" }, [
+    el("h3", { text: "Edit as TOML" }),
+    el("p", { class: "muted", text:
+      (a.name === "Default" ? "The base answer every other answer inherits from. " : "Only the keys this answer sets; anything not listed is inherited from Default. ") +
+      "Paste or load an existing answer.toml, edit freely, then Apply to load it into the editor and Save as usual. " +
+      `Stored credentials show as ${MASK}; leave that marker to keep them, or replace it with a new value. ` +
+      "Deprecated snake_case keys are renamed and your # comments are kept. Filters (Filters tab) are not part of the file." }),
+    el("div", { class: "inline", style: "margin-bottom:10px" }, [
+      el("button", { class: "primary", text: "Apply to editor", onclick: apply }),
+      el("button", { text: "Load file…", onclick: () => fileInput.click() }), fileInput,
+      el("button", { text: "Reset", title: "Discard edits here and re-render from the editor", onclick: load }),
+      status,
+    ]),
+    area,
+    notes,
+  ]);
+}
+
 /* ------------------------------- preview ----------------------------- */
+
+/** Card listing what the installer would reject in the merged answer, or null. */
+function problemCard(problems, saved = true) {
+  if (!problems || !problems.length) return null;
+  return el("div", { class: "card", style: "border-color: var(--warn)" }, [
+    el("h3", {}, [el("span", { text: "The installer would reject this answer" }), el("span", { class: "tag", text: "check" })]),
+    el("p", { class: "muted", style: "margin-top:0", text: (saved ? "As saved, " : "") + "Default merged with this answer has these problems:" }),
+    warningList(problems),
+  ]);
+}
 
 function renderPreview() {
   const a = S.answer;
   const pre = el("pre", { class: "toml", text: "loading…" });
+  const issues = el("div");
   const load = async (reveal) => {
     const r = await api(`/answers/${encodeURIComponent(a.name)}/preview` + (reveal ? "?reveal=1" : ""));
     pre.textContent = r.toml;
+    issues.innerHTML = "";
+    const card = problemCard(r.problems, true);
+    if (card) issues.append(card);
     if (reveal) toast("Credentials revealed — this is recorded in the audit log.", "warn");
   };
   load(false);
-  const wrap = el("div", { class: "card" }, [
+  const wrap = el("div", {}, [issues, el("div", { class: "card" }, [
     el("h3", { text: "answer.toml" }),
     el("p", { class: "muted", text: a.name === "Default" ? "This is the base every other answer inherits from." : "Default merged with this answer, exactly as the installer would receive it." }),
     el("div", { class: "inline", style: "margin-bottom:10px" }, [
@@ -636,7 +774,7 @@ function renderPreview() {
     ]),
     pre,
     el("p", { class: "muted", style: "margin-bottom:0", text: "Downloading includes real credentials so the file works offline. Treat it like a secret; the download is recorded in the audit log." }),
-  ]);
+  ])]);
   return wrap;
 }
 
@@ -794,8 +932,10 @@ function renderRelay() {
     el("div", { class: "card" }, [el("h3", { text: "Body template" }), tmpl]),
     el("div", { class: "card" }, [
       el("h3", { text: "Installer configuration" }),
-      el("p", { class: "muted", text: "Set this as the post-installation-webhook URL in your answer:" }),
-      el("div", { class: "url", text: `${S.boot.config.origin}/hook/${r.name}` + (S.boot.config.serve_token_configured ? "/<SERVE_TOKEN>" : "") }),
+      el("p", { class: "muted", text: "Set this as the post-installation-webhook url in your answer, and set its auth-token (PVE 9.2+) to your SERVE_TOKEN. The token then travels in the request body instead of the URL, and it is removed before the payload is relayed. Older installers: append /<SERVE_TOKEN> to the URL instead." }),
+      el("div", { class: "url", text: `${S.boot.config.origin}/hook/${r.name}` }),
+      S.boot.config.serve_token_configured ? "" : el("div", { class: "banner warn", text:
+        "No SERVE_TOKEN is set, so this relay will refuse every installer call. Set one: openssl rand -hex 24 | wrangler secret put SERVE_TOKEN" }),
     ]),
     el("div", { class: "card", id: "relay-log" }, [el("h3", { text: "Delivery log" }), el("button", { text: "Refresh", onclick: loadRelayLog })]),
   );
@@ -870,6 +1010,31 @@ function wireGlobalButtons() {
     await refreshAnswerList();
     openAnswer(r.answer.name);
   };
+  $("#answer-import").onclick = () => $("#answer-import-input").click();
+  $("#answer-import-input").onchange = async (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    if (S.dirty && !confirm("Discard unsaved changes?")) return;
+    let parsed;
+    try {
+      parsed = await api("/toml/parse", { method: "POST", body: { toml: await f.text() } });
+    } catch (err) { return toast(err.message, "bad", 12000); }
+    const name = await ask("Import answer.toml", `Create a new answer from ${f.name}. It inherits from Default; review it, then Save.`, f.name.replace(/\.toml$/i, ""), "Import");
+    if (!name) return;
+    try {
+      const r = await api("/answers", { method: "POST", body: { name } });
+      await refreshAnswerList();
+      S.dirty = false;
+      await openAnswer(r.answer.name);
+      const extra = applyParsedDoc(parsed.doc);
+      S.tab = "global";
+      renderAnswer();
+      const all = [...(parsed.warnings || []), ...extra];
+      if (all.length) toast("Imported with notes: " + all.join(" "), "warn", 15000);
+      else toast("Imported — review it, then Save.");
+    } catch (err) { toast(err.message, "bad", 12000); }
+  };
   $("#answer-copy").onclick = async () => {
     if (!S.answer) return toast("Select an answer first.", "warn");
     const name = await ask("Copy answer", `Copy "${S.answer.name}" to a new name.`, S.answer.name + " copy", "Copy");
@@ -916,7 +1081,8 @@ function wireGlobalButtons() {
       S.dirty = false;
       await refreshAnswerList();
       renderAnswer();
-      toast("Saved.");
+      if (r.problems?.length) toast(`Saved, but the installer would reject it as merged with Default: ${r.problems.join(" ")} See the answer.toml tab.`, "warn", 15000);
+      else toast("Saved.");
     } catch (err) {
       toast(err.message, "bad", 12000);
     }

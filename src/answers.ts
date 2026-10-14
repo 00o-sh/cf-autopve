@@ -221,23 +221,59 @@ export function normaliseDoc(input: AnswerDoc): AnswerDoc {
     ? input.must_not_contain.filter((s: unknown) => typeof s === "string" && s.trim() !== "")
     : [];
 
-  // Enabling NIC pinning is implied by having a mapping.
+  // NIC pinning: a mapping implies enabled; enabled on its own is also valid
+  // (the installer then names every NIC nic0, nic1, ...).
   const mapping = out["network.interface-name-pinning.mapping"] as Record<string, unknown> | undefined;
-  if (mapping && Object.keys(mapping).length > 0) {
-    out["network.interface-name-pinning"] = { enabled: true };
-  } else {
-    delete out["network.interface-name-pinning"];
-    delete out["network.interface-name-pinning.mapping"];
-  }
+  const hasMapping = !!mapping && Object.keys(mapping).length > 0;
+  const pinning = out["network.interface-name-pinning"] as Record<string, unknown> | undefined;
+  if (hasMapping || pinning?.enabled === true) out["network.interface-name-pinning"] = { enabled: true };
+  else delete out["network.interface-name-pinning"];
+  if (!hasMapping) delete out["network.interface-name-pinning.mapping"];
 
-  const disk = out["disk-setup"] as Record<string, unknown> | undefined;
-  if (disk && "disk-list" in disk && Object.keys(disk).some((k) => k.startsWith("filter"))) {
-    throw new ValidationError("disk-setup cannot use disk-list and a filter at the same time.");
+  for (const [section, groups] of Object.entries(EXCLUSIVE)) {
+    const table = out[section] as Record<string, unknown> | undefined;
+    if (!table) continue;
+    for (const group of groups) {
+      const used = group.filter((alt) => Object.keys(table).some(alt.has));
+      if (used.length > 1) throw new ValidationError(`${section} cannot use ${used.map((a) => a.label).join(" and ")} at the same time.`);
+    }
+  }
+  const net = out.network as Record<string, unknown> | undefined;
+  if (net?.source === "from-dhcp") {
+    const statics = Object.keys(net).filter(isStaticNetKey);
+    if (statics.length) {
+      throw new ValidationError(`network: with source = "from-dhcp" the installer rejects ${statics.join(", ")}. Use source = "from-answer" or remove them.`);
+    }
   }
 
   const comments = normaliseComments(input.comments, out);
   if (Object.keys(comments).length) out.comments = comments;
   return out;
+}
+
+interface Alternative {
+  label: string;
+  has: (key: string) => boolean;
+}
+
+const only = (k: string): Alternative => ({ label: k, has: (key) => key === k });
+const family = (prefix: string, label: string): Alternative => ({ label, has: (key) => key.startsWith(prefix) });
+
+/**
+ * Keys the installer refuses to see together. Within a document that is a
+ * validation error; across inheritance, whichever alternative the answer sets
+ * replaces the other one in Default.
+ */
+const EXCLUSIVE: Record<string, Alternative[][]> = {
+  global: [
+    [only("root-password"), only("root-password-hashed")],
+    [only("fqdn"), family("fqdn.", "fqdn.source/fqdn.domain")],
+  ],
+  "disk-setup": [[only("disk-list"), family("filter", "a filter")]],
+};
+
+function isStaticNetKey(key: string): boolean {
+  return key === "cidr" || key === "dns" || key === "gateway" || key.startsWith("filter");
 }
 
 /** Scopes that can carry comments: every TOML section, plus the two filter lists. */
@@ -396,17 +432,22 @@ export function mergeDocs(defaultDoc: AnswerDoc, answerDoc: AnswerDoc): AnswerDo
   for (const section of SECTION_ORDER) {
     const child = answerDoc[section];
     if (!child || typeof child !== "object" || Array.isArray(child)) continue;
-    if (section === "disk-setup") {
-      const base = (out[section] ?? {}) as Record<string, unknown>;
-      const childKeys = Object.keys(child as Record<string, unknown>);
-      if (childKeys.some((k) => k.startsWith("filter")) && "disk-list" in base) delete base["disk-list"];
-      if (childKeys.includes("disk-list")) {
-        for (const k of Object.keys(base)) if (k.startsWith("filter")) delete base[k];
+    const base = (out[section] ?? {}) as Record<string, unknown>;
+    const childKeys = Object.keys(child as Record<string, unknown>);
+    for (const group of EXCLUSIVE[section] ?? []) {
+      for (const alt of group) {
+        if (!childKeys.some(alt.has)) continue;
+        for (const other of group) {
+          if (other === alt) continue;
+          for (const k of Object.keys(base)) if (other.has(k)) delete base[k];
+        }
       }
-      out[section] = { ...base, ...(child as Record<string, unknown>) };
-      continue;
     }
-    out[section] = { ...((out[section] ?? {}) as Record<string, unknown>), ...(child as Record<string, unknown>) };
+    // An answer switching to DHCP drops Default's static addressing and NIC filter.
+    if (section === "network" && (child as Record<string, unknown>).source === "from-dhcp") {
+      for (const k of Object.keys(base)) if (isStaticNetKey(k)) delete base[k];
+    }
+    out[section] = { ...base, ...(child as Record<string, unknown>) };
   }
   // A key the answer sets carries the answer's comment (or none), never Default's.
   const comments: Record<string, Record<string, string>> = JSON.parse(JSON.stringify(defaultDoc.comments ?? {}));
@@ -422,6 +463,67 @@ export function mergeDocs(defaultDoc: AnswerDoc, answerDoc: AnswerDoc): AnswerDo
     comments[section] = merged;
   }
   out.comments = comments;
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * Checking what the installer will actually receive
+ * ------------------------------------------------------------------ */
+
+const present = (v: unknown) => v !== undefined && v !== null && v !== "";
+
+/**
+ * Problems in a merged answer (Default layered under the answer) that the
+ * installer would reject. Each document can be valid on its own and still
+ * combine into something broken, e.g. an answer that adds a static `cidr`
+ * while Default says `from-dhcp`. Returned as messages, not thrown: the
+ * answer still saves, and the operator sees why the install would fail.
+ */
+export function lintMerged(doc: AnswerDoc): string[] {
+  const out: string[] = [];
+  const g = (doc.global ?? {}) as Record<string, unknown>;
+  const net = (doc.network ?? {}) as Record<string, unknown>;
+  const disk = (doc["disk-setup"] ?? {}) as Record<string, unknown>;
+  const has = (t: Record<string, unknown>, k: string) => present(t[k]);
+  const hasPrefix = (t: Record<string, unknown>, p: string) => Object.keys(t).some((k) => k.startsWith(p) && present(t[k]));
+
+  for (const k of ["keyboard", "country", "mailto", "timezone"]) if (!has(g, k)) out.push(`global.${k} is required.`);
+  if (!has(g, "fqdn") && !has(g, "fqdn.source")) out.push("global.fqdn (or fqdn.source = \"from-dhcp\") is required.");
+  const pw = ["root-password", "root-password-hashed"].filter((k) => has(g, k));
+  if (pw.length === 0) out.push("Set one of global.root-password or global.root-password-hashed.");
+  if (pw.length === 2) out.push("Set only one of global.root-password and global.root-password-hashed.");
+
+  if (!has(net, "source")) out.push("network.source is required.");
+  if (net.source === "from-dhcp") {
+    const statics = Object.keys(net).filter((k) => isStaticNetKey(k) && present(net[k]));
+    if (statics.length) out.push(`network.source is "from-dhcp", so ${statics.map((k) => `network.${k}`).join(", ")} must not be set.`);
+  }
+  if (net.source === "from-answer") {
+    for (const k of ["cidr", "dns", "gateway"]) if (!has(net, k)) out.push(`network.${k} is required with source = "from-answer".`);
+  }
+
+  const fs = disk.filesystem;
+  if (!present(fs)) out.push("disk-setup.filesystem is required.");
+  const usesList = has(disk, "disk-list");
+  const usesFilter = hasPrefix(disk, "filter.");
+  if (!usesList && !usesFilter) out.push("disk-setup needs disk-list or at least one filter.<udev property>.");
+  if (usesList && usesFilter) out.push("disk-setup uses disk-list and a filter; the installer allows only one.");
+  if (fs === "zfs" && !has(disk, "zfs.raid")) out.push('disk-setup.zfs.raid is required with filesystem = "zfs".');
+  if (fs === "btrfs" && !has(disk, "btrfs.raid")) out.push('disk-setup.btrfs.raid is required with filesystem = "btrfs".');
+  const family: Record<string, string[]> = { "zfs.": ["zfs"], "lvm.": ["ext4", "xfs"], "btrfs.": ["btrfs"] };
+  for (const [prefix, fits] of Object.entries(family)) {
+    if (present(fs) && hasPrefix(disk, prefix) && !fits.includes(String(fs))) {
+      out.push(`disk-setup has ${prefix}* options but filesystem = "${fs}"; they only apply to ${fits.join("/")}.`);
+    }
+  }
+
+  const fb = doc["first-boot"] as Record<string, unknown> | undefined;
+  if (fb && Object.keys(fb).length) {
+    if (!has(fb, "source")) out.push("first-boot.source is required when the first-boot section is used.");
+    if (fb.source === "from-url" && !has(fb, "url")) out.push('first-boot.url is required with source = "from-url".');
+  }
+  const hook = doc["post-installation-webhook"] as Record<string, unknown> | undefined;
+  if (hook && Object.keys(hook).length && !has(hook, "url")) out.push("post-installation-webhook.url is required when the section is used.");
   return out;
 }
 

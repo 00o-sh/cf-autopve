@@ -14,6 +14,8 @@ export interface Env {
   FILE_MAX_BYTES?: string;
   HISTORY_MAX_BYTES?: string;
   HISTORY_LIMIT?: string;
+  /** "auto" (default): JSON when the installer prefers it, else TOML. "toml": always TOML. */
+  ANSWER_FORMAT?: string;
 
   /** Local development escape hatch. Never set this in production. */
   DEV_ALLOW_INSECURE_UI?: string;

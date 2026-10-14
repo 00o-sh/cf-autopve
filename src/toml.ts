@@ -72,6 +72,57 @@ export function emitToml(doc: AnswerDoc, opts: EmitOptions = {}): string {
   return out.join("\n").replace(/\n+$/, "\n");
 }
 
+/**
+ * The same answer as a JSON object, for installers that ask for JSON (the
+ * installer advertises both and prefers JSON). Sections and dotted keys become
+ * nested objects exactly as TOML would read them: `[disk-setup] zfs.raid` is
+ * {"disk-setup": {"zfs": {"raid": ...}}}. Comments and filter metadata are
+ * dropped, as in emitToml(). Always the real values: never call this on a
+ * document that should be redacted.
+ */
+export function emitJson(doc: AnswerDoc): Record<string, unknown> {
+  const out: Record<string, any> = {};
+  const descend = (root: Record<string, any>, path: string[]) => {
+    let cur = root;
+    for (const seg of path) {
+      if (!cur[seg] || typeof cur[seg] !== "object" || Array.isArray(cur[seg])) cur[seg] = {};
+      cur = cur[seg];
+    }
+    return cur;
+  };
+  for (const section of SECTION_ORDER) {
+    const table = doc[section];
+    if (!table || typeof table !== "object" || Array.isArray(table)) continue;
+    const entries = Object.entries(table as Record<string, TomlValue>).filter(([, v]) => v !== undefined && v !== null && v !== "");
+    if (entries.length === 0 && PRUNE_WHEN_EMPTY.includes(section)) continue;
+    const target = descend(out, section.split("."));
+    for (const [key, value] of entries) {
+      const path = key.split(".");
+      descend(target, path.slice(0, -1))[path[path.length - 1]] = value;
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether to answer with JSON: only when the client asks for JSON at least as
+ * strongly as for TOML. No Accept header, or one without JSON, gets TOML.
+ */
+export function prefersJson(accept: string | null): boolean {
+  if (!accept) return false;
+  const q: Record<string, number> = {};
+  for (const part of accept.split(",")) {
+    const [type, ...params] = part.trim().toLowerCase().split(";").map((x) => x.trim());
+    if (!type) continue;
+    const qp = params.find((p) => p.startsWith("q="));
+    const weight = qp ? Number(qp.slice(2)) : 1;
+    q[type] = Math.max(q[type] ?? 0, Number.isFinite(weight) ? weight : 0);
+  }
+  const json = q["application/json"] ?? 0;
+  const toml = Math.max(q["application/toml"] ?? 0, q["text/toml"] ?? 0, q["text/plain"] ?? 0);
+  return json > 0 && json >= toml;
+}
+
 /** One line, no control characters, bounded: safe to emit after a `#`. */
 export function cleanComment(text: string): string {
   return text.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);

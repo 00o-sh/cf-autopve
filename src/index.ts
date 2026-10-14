@@ -4,7 +4,7 @@
  *   /                 configurator UI            (Cloudflare Access required)
  *   /api/*            configurator API           (Cloudflare Access required)
  *   POST /answer      installer answer endpoint  (unauthenticated by nature — see guards.ts)
- *   POST /hook/<name> post-installation webhook -> outbound relay
+ *   POST /hook/<name> post-installation webhook -> outbound relay (needs SERVE_TOKEN)
  *   GET  /files/<n>   first-boot scripts and other hosted files
  *   GET  /healthz     liveness
  */
@@ -14,11 +14,11 @@ import { clientIp, num } from "./env";
 import { AccessError, requireIdentity } from "./access";
 import { handleApi } from "./api";
 import { addHistory, rateLimited, recordSysinfoKeys, trimHistory } from "./db";
-import { decryptDoc, docHasSecrets, selectAnswer, systemName } from "./answers";
-import { canServe, consumeServe, tokenOk } from "./guards";
+import { decryptDoc, docHasSecrets, lintMerged, selectAnswer, systemName } from "./answers";
+import { bodyTokenOk, canServe, claimServe, hookAllowed, tokenOk } from "./guards";
 import { serveFile } from "./files";
 import { deliver, getRelay } from "./relay";
-import { emitToml } from "./toml";
+import { emitJson, emitToml, prefersJson } from "./toml";
 
 const TEXT = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" };
 
@@ -101,23 +101,32 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
     return new Response("no answers are configured on this deployment\n", { status: 404, headers: TEXT });
   }
   const record = selection.record;
-  const decision = canServe(env, record, { request, ip, pathToken });
-
-  if (!decision.allowed) {
+  const refuse = (reason: string): Response => {
     ctx.waitUntil(
       (async () => {
         await addHistory(env, {
           ts: Date.now(), kind: "answer", answer: record.name, system_name: systemName(systemInfo),
-          ip, outcome: "denied", detail: decision.reason, response: "", system_info: systemInfoRaw,
+          ip, outcome: "denied", detail: reason, response: "", system_info: systemInfoRaw,
         });
         await recordSysinfoKeys(env, systemInfoRaw);
       })(),
     );
-    return new Response(`refused: ${decision.reason}\n`, { status: 403, headers: TEXT });
+    return new Response(`refused: ${reason}\n`, { status: 403, headers: TEXT });
+  };
+
+  const decision = canServe(env, record, { request, ip, pathToken });
+  if (!decision.allowed) return refuse(decision.reason);
+
+  // Spend the serve before decrypting anything; a lost claim means a
+  // concurrent request took the last serve or the answer was disarmed.
+  if (!(await claimServe(env, record))) {
+    return refuse(`answer "${record.name}" was disarmed or used up its serves while this request was in flight`);
   }
 
+  const problems = lintMerged(selection.merged);
   const plain = await decryptDoc(selection.merged, env);
-  const toml = emitToml(plain);
+  const asJson = (env.ANSWER_FORMAT ?? "auto").toLowerCase() !== "toml" && prefersJson(request.headers.get("Accept"));
+  const body = asJson ? JSON.stringify(emitJson(plain)) : emitToml(plain);
   const redacted = emitToml(selection.merged, { redact: true, redactionText: "REDACTED-BY-AUTOPVE" });
 
   ctx.waitUntil(
@@ -125,17 +134,27 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
       const id = await addHistory(env, {
         ts: Date.now(), kind: "answer", answer: record.name, system_name: systemName(systemInfo),
         ip, outcome: "served",
-        detail: docHasSecrets(selection.merged) ? "served with credentials" : "",
+        detail: [
+          docHasSecrets(selection.merged) ? "served with credentials" : "",
+          asJson ? "as JSON" : "",
+          problems.length ? `installer will likely reject it: ${problems.join(" ")}` : "",
+        ].filter(Boolean).join("; "),
         response: redacted, system_info: systemInfoRaw,
       });
       await recordSysinfoKeys(env, systemInfoRaw);
-      await consumeServe(env, record);
       if (id % 25 === 0) await trimHistory(env);
     })(),
   );
 
-  return new Response(toml, {
-    headers: { ...TEXT, "X-AutoPVE-Answer": record.name, "X-Robots-Tag": "noindex" },
+  return new Response(body, {
+    headers: {
+      ...TEXT,
+      // TOML keeps the text/plain it has always been served with.
+      ...(asJson ? { "Content-Type": "application/json; charset=utf-8" } : {}),
+      "X-AutoPVE-Answer": record.name,
+      "X-Robots-Tag": "noindex",
+      Vary: "Accept",
+    },
   });
 }
 
@@ -150,20 +169,32 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
   const pathToken = segments[1] ?? null;
   const ip = clientIp(request);
 
-  if (!tokenOk(env, request, pathToken)) return new Response("refused: serve token missing or incorrect\n", { status: 403, headers: TEXT });
+  if (!env.SERVE_TOKEN) return new Response(`refused: ${hookAllowed(env, request, pathToken).reason}\n`, { status: 403, headers: TEXT });
   if (await rateLimited(env, ip, "hook")) return new Response("rate limit exceeded\n", { status: 429, headers: TEXT });
 
-  const relay = await getRelay(env, name);
-  if (!relay || !relay.enabled) return new Response(`no enabled relay named "${name}"\n`, { status: 404, headers: TEXT });
-
-  const rawBody = (await request.text()).slice(0, 512 * 1024);
+  let rawBody = (await request.text()).slice(0, 512 * 1024);
   let payload: any = {};
   try {
     payload = rawBody ? JSON.parse(rawBody) : {};
   } catch {
     payload = {};
   }
-  const infoRaw = JSON.stringify(payload);
+  const bodyToken = payload && typeof payload === "object" ? payload.token : null;
+  const decision = hookAllowed(env, request, pathToken, bodyToken);
+  if (!decision.allowed) return new Response(`refused: ${decision.reason}\n`, { status: 403, headers: TEXT });
+
+  // Our token authenticated the call; it is not the relay target's business,
+  // and it must not land in history either. Any other token value is the
+  // receiver's own auth-token and is passed through untouched.
+  if (bodyTokenOk(env, bodyToken)) {
+    delete payload.token;
+    rawBody = JSON.stringify(payload);
+  }
+
+  const relay = await getRelay(env, name);
+  if (!relay || !relay.enabled) return new Response(`no enabled relay named "${name}"\n`, { status: 404, headers: TEXT });
+  // A token is a credential either way: never into history or the key index.
+  const infoRaw = JSON.stringify(payload && typeof payload === "object" && "token" in payload ? { ...payload, token: undefined } : payload);
 
   const id = await addHistory(env, {
     ts: Date.now(), kind: "hook", answer: null, system_name: systemName(payload), ip,
