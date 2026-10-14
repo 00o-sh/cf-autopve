@@ -7,3 +7,7 @@ export { scanForSecrets } from "../src/files";
 export { isSecretKey } from "../src/schema";
 export { checkValue, FORMATS } from "../src/validate";
 export { parseAnswerToml } from "../src/tomlimport";
+export { emitJson, prefersJson } from "../src/toml";
+export { lintMerged } from "../src/answers";
+export { bodyTokenOk, tokenOk } from "../src/guards";
+export { parse as parseTomlRaw } from "smol-toml";

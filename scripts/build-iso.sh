@@ -20,6 +20,7 @@ OUT_DIR="./iso"
 RUNNER="auto"
 FIRST_BOOT=""
 NO_TOKEN=0
+TOKEN_IN_URL=0
 SAFE_COPY=auto
 
 die() { echo "build-iso: $*" >&2; exit 1; }
@@ -35,6 +36,8 @@ Usage: build-iso.sh [options]
   --out DIR          where to put downloads and the result (default: ./iso)
   --first-boot FILE  bake a first-boot executable into the ISO (answer: first-boot.source = "from-iso")
   --no-token         the deployment has no SERVE_TOKEN
+  --token-in-url     put the token in the answer URL even if the assistant can send it as an
+                     Authorization header (the default when it supports --answer-auth-token)
   --runner MODE      auto | native | docker | podman (default: auto)
   --safe-copy        copy the ISO with plain reads/writes (needs strace); on by default under WSL,
                      where the tool's in-kernel copy can fail with "Cannot allocate memory"
@@ -53,6 +56,7 @@ while [ $# -gt 0 ]; do
     --out) OUT_DIR="${2:?}"; shift 2 ;;
     --first-boot) FIRST_BOOT="${2:?}"; shift 2 ;;
     --no-token) NO_TOKEN=1; shift ;;
+    --token-in-url) TOKEN_IN_URL=1; shift ;;
     --runner) RUNNER="${2:?}"; shift 2 ;;
     --safe-copy) SAFE_COPY=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -78,8 +82,13 @@ if [ "$NO_TOKEN" -eq 0 ]; then
   fi
   [ -n "$TOKEN" ] || say "no token given; building for a deployment without SERVE_TOKEN"
 fi
+# The token goes in an Authorization header when the assistant supports it
+# (--answer-auth-token, PVE 9.2+): headers stay out of URLs and access logs.
+# Older assistants only take a URL, so the token falls back to a path segment.
+BASE_ANSWER_URL="$URL/answer"
 ANSWER_URL="$URL/answer${TOKEN:+/$TOKEN}"
-SHOWN_URL="$URL/answer${TOKEN:+/<token>}"
+AUTH_TOKEN=""
+[ -z "$TOKEN" ] || [ "$TOKEN_IN_URL" -eq 1 ] || AUTH_TOKEN="autopve:$TOKEN"
 
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
@@ -165,18 +174,38 @@ if [ "$SAFE_COPY" = 1 ]; then
 fi
 export AUTOPVE_SAFE_COPY="$SAFE_COPY"
 
-# The answer URL travels as an environment variable so the token is not visible
-# in the process list; the container gets it by name only.
-export AUTOPVE_ANSWER_URL="$ANSWER_URL"
+# The answer URL and token travel as environment variables so the token is
+# not visible in docker's process list; the container gets them by name only.
+export AUTOPVE_ANSWER_URL="$ANSWER_URL" AUTOPVE_BASE_ANSWER_URL="$BASE_ANSWER_URL" AUTOPVE_AUTH_TOKEN="$AUTH_TOKEN"
 ISO_DIR="$(dirname "$ISO")"
 FB_ARGS=()
 
-say "building with $RUNNER: answer URL $SHOWN_URL"
+# Sets FETCH_ARGS from what the installed assistant supports. Kept as text so
+# the container runs the identical logic.
+PICK_FETCH='
+FETCH_ARGS=(--url "$AUTOPVE_ANSWER_URL")
+if [ -n "$AUTOPVE_AUTH_TOKEN" ]; then
+  if proxmox-auto-install-assistant prepare-iso --help 2>&1 | grep -q -- --answer-auth-token; then
+    FETCH_ARGS=(--url "$AUTOPVE_BASE_ANSWER_URL" --answer-auth-token "$AUTOPVE_AUTH_TOKEN")
+    echo "==> token sent as an Authorization header; answer URL ${AUTOPVE_BASE_ANSWER_URL}" >&2
+  else
+    echo "==> this assistant has no --answer-auth-token; token goes in the answer URL instead" >&2
+  fi
+fi
+if [ "${FETCH_ARGS[2]:-}" != --answer-auth-token ]; then
+  if [ "$AUTOPVE_ANSWER_URL" = "$AUTOPVE_BASE_ANSWER_URL" ]; then echo "==> answer URL $AUTOPVE_BASE_ANSWER_URL" >&2
+  else echo "==> answer URL $AUTOPVE_BASE_ANSWER_URL/<token>" >&2; fi
+fi
+'
+export PICK_FETCH
+
+say "building with $RUNNER"
 case "$RUNNER" in
   native)
     [ -z "$FIRST_BOOT" ] || FB_ARGS=(--on-first-boot "$FIRST_BOOT")
+    eval "$PICK_FETCH"
     ${COPY_WRAP[@]+"${COPY_WRAP[@]}"} proxmox-auto-install-assistant prepare-iso "$ISO" --fetch-from http \
-      --url "$AUTOPVE_ANSWER_URL" --output "$OUTPUT" ${FB_ARGS[@]+"${FB_ARGS[@]}"} \
+      "${FETCH_ARGS[@]}" --output "$OUTPUT" ${FB_ARGS[@]+"${FB_ARGS[@]}"} \
       2>&1 | { grep -v --line-buffered 'arch_set_scno' || true; }
     ;;
   docker|podman)
@@ -186,7 +215,7 @@ case "$RUNNER" in
       FB_ARGS=(--on-first-boot /first-boot)
     fi
     # shellcheck disable=SC2016  # expands inside the container, not here
-    "$RUNNER" run --rm -e AUTOPVE_ANSWER_URL -e AUTOPVE_SAFE_COPY "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euo pipefail -c '
+    "$RUNNER" run --rm -e AUTOPVE_ANSWER_URL -e AUTOPVE_BASE_ANSWER_URL -e AUTOPVE_AUTH_TOKEN -e PICK_FETCH -e AUTOPVE_SAFE_COPY "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq >/dev/null
       apt-get install -y -qq --no-install-recommends ca-certificates curl xorriso strace >/dev/null
@@ -199,8 +228,9 @@ case "$RUNNER" in
       wrap=()
       [ "$AUTOPVE_SAFE_COPY" != 1 ] || wrap=(strace -f -qq -o /dev/null -e trace=copy_file_range,sendfile \
         -e inject=copy_file_range:error=ENOSYS -e inject=sendfile:error=ENOSYS)
+      eval "$PICK_FETCH"
       ${wrap[@]+"${wrap[@]}"} proxmox-auto-install-assistant prepare-iso "/src/$src" --fetch-from http \
-        --url "$AUTOPVE_ANSWER_URL" --output "/out/$out" --tmp /out "$@" \
+        "${FETCH_ARGS[@]}" --output "/out/$out" --tmp /out "$@" \
         2>&1 | { grep -v --line-buffered arch_set_scno || true; }
     ' "$NAME" "$KEY_URL" "$SUITE" "$(basename "$OUTPUT")" ${FB_ARGS[@]+"${FB_ARGS[@]}"}
     ;;

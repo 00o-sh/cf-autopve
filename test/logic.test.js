@@ -407,6 +407,94 @@ test("broken TOML is refused with the parser's reason; invalid values still load
   assert.ok(warnings.some((w) => /global.keyboard is not a recognised value|must be one of/.test(w)));
 });
 
+/* ------------------------- token placements --------------------------- */
+
+const tokenReq = (headers = {}) => new Request("https://pve.example.com/answer", { method: "POST", headers });
+
+test("the installer's Authorization: Bearer <name>:<token> is accepted", () => {
+  const env = { SERVE_TOKEN: "s3cr3t" };
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Bearer autopve:s3cr3t" }), null), true);
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Bearer s3cr3t" }), null), true);
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "bearer node7:s3cr3t" }), null), true, "scheme is case-insensitive");
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Bearer autopve:wrong" }), null), false);
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Bearer :s3cr3t" }), null), false, "an empty name is not the <name>:<secret> form");
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Basic czNjcjN0" }), null), false);
+  assert.equal(A.tokenOk(env, tokenReq({ Authorization: "Bearer s3cr3t:autopve" }), null), false, "the token is the part after the name");
+});
+
+test("a webhook body token equal to SERVE_TOKEN authorises /hook without a URL token", () => {
+  const env = { SERVE_TOKEN: "s3cr3t" };
+  const hook = new Request("https://pve.example.com/hook/deploy", { method: "POST" });
+  assert.equal(A.hookAllowed(env, hook, null, "s3cr3t").allowed, true);
+  assert.equal(A.hookAllowed(env, hook, null, "receivers-own-token").allowed, false);
+  assert.equal(A.hookAllowed(env, hook, null, { not: "a string" }).allowed, false);
+  assert.match(A.hookAllowed({}, hook, null, "s3cr3t").reason, /disabled until a SERVE_TOKEN/, "a body token never stands in for having a SERVE_TOKEN");
+  assert.equal(A.bodyTokenOk({ SERVE_TOKEN: "s3cr3t" }, "s3cr3t"), true);
+  assert.equal(A.bodyTokenOk({}, ""), false);
+});
+
+/* --------------------------- merged answer ----------------------------- */
+
+const GOOD = {
+  global: { keyboard: "en-us", country: "us", fqdn: "pve1.example.com", mailto: "a@example.com", timezone: "UTC", "root-password-hashed": "$6$x" },
+  network: { source: "from-dhcp" },
+  "disk-setup": { filesystem: "zfs", "zfs.raid": "raid1", "disk-list": ["sda", "sdb"] },
+};
+
+test("a complete merged answer has no problems", () => {
+  assert.deepEqual(A.lintMerged(GOOD), []);
+});
+
+test("an answer that is fine alone can merge into one the installer rejects", () => {
+  const merged = A.mergeDocs(GOOD, { network: { cidr: "10.0.0.5/24" } });
+  assert.deepEqual(A.lintMerged(merged), ['network.source is "from-dhcp", so network.cidr must not be set.']);
+});
+
+test("missing required keys and mismatched filesystem options are reported", () => {
+  const problems = A.lintMerged({
+    global: { keyboard: "de" },
+    network: { source: "from-answer", cidr: "10.0.0.5/24" },
+    "disk-setup": { filesystem: "ext4", "zfs.raid": "raid1" },
+    "first-boot": { source: "from-url" },
+  });
+  const all = problems.join("\n");
+  for (const want of [/global.country is required/, /global.fqdn/, /root-password or global.root-password-hashed/,
+    /network.dns is required/, /network.gateway is required/, /disk-list or at least one filter/,
+    /zfs.\* options but filesystem = "ext4"/, /first-boot.url is required/]) {
+    assert.match(all, want);
+  }
+  assert.doesNotMatch(all, /zfs.raid is required/);
+});
+
+test("the stock Default answer is flagged for its missing root password", () => {
+  const def = { global: { keyboard: "en-us", country: "at", fqdn: "pveauto.testinstall", mailto: "mail@no.invalid", timezone: "Europe/Vienna" },
+    network: { source: "from-dhcp" }, "disk-setup": { filesystem: "zfs", "zfs.raid": "raid1", "disk-list": ["sda", "sdb"] } };
+  assert.deepEqual(A.lintMerged(def), ["Set one of global.root-password or global.root-password-hashed."]);
+});
+
+/* ------------------------------ JSON answers --------------------------- */
+
+test("the JSON answer is exactly what a TOML parser reads from the TOML answer", () => {
+  const doc = A.parseAnswerToml(UPSTREAM_EXAMPLE).doc;
+  const toml = A.emitToml(doc);
+  assert.deepEqual(A.emitJson(doc), JSON.parse(JSON.stringify(A.parseTomlRaw(toml))));
+  const json = A.emitJson(doc);
+  assert.equal(json["disk-setup"].zfs.raid, "raid1");
+  assert.equal(json["disk-setup"].filter.ID_SERIAL, "KIOXIA*");
+  assert.deepEqual(json.network["interface-name-pinning"], { enabled: true, mapping: { "24:8a:07:1e:05:bc": "lan0" } });
+  assert.ok(!("comments" in json) && !("must_contain" in json));
+});
+
+test("JSON only when the client prefers it", () => {
+  assert.equal(A.prefersJson(null), false, "no Accept header keeps TOML");
+  assert.equal(A.prefersJson("*/*"), false);
+  assert.equal(A.prefersJson("application/json"), true);
+  assert.equal(A.prefersJson("application/json, application/toml;q=0.9"), true);
+  assert.equal(A.prefersJson("application/toml, application/json;q=0.5"), false);
+  assert.equal(A.prefersJson("application/json;q=0"), false);
+  assert.equal(A.prefersJson("text/plain;q=0.8, application/json;q=0.8"), true, "a tie goes to JSON");
+});
+
 /* ------------------------------- relay ------------------------------- */
 
 test("relay templates resolve nested paths and escape strings", () => {

@@ -10,7 +10,7 @@ import { requireIdentity, type Identity } from "./access";
 import { audit, trimHistory } from "./db";
 import {
   DEFAULT_NAME, MASK_MARKER, ValidationError, deleteAnswer, decryptDoc, docHasSecrets, ensureDefaultAnswer,
-  getAnswer, listAnswers, maskDoc, mergeDocs, normaliseDoc, saveAnswer, secretKeysIn, selectAnswer, validateName,
+  getAnswer, lintMerged, listAnswers, maskDoc, mergeDocs, normaliseDoc, saveAnswer, secretKeysIn, selectAnswer, validateName,
   type AnswerRecord, type ServeMode,
 } from "./answers";
 import { parseAnswerToml } from "./tomlimport";
@@ -57,6 +57,10 @@ async function mergedDocFor(env: Env, record: AnswerRecord): Promise<any> {
   if (record.name === DEFAULT_NAME) return record.doc;
   const def = await getAnswer(env, DEFAULT_NAME);
   return mergeDocs(def?.doc ?? {}, record.doc);
+}
+
+async function problemsFor(env: Env, record: AnswerRecord): Promise<string[]> {
+  return lintMerged(await mergedDocFor(env, record));
 }
 
 async function renderToml(env: Env, record: AnswerRecord, reveal: boolean): Promise<string> {
@@ -142,7 +146,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     if (!action) {
       if (method === "GET") {
         if (!record) return json({ error: "no such answer" }, 404);
-        return json({ answer: publicAnswer(record), preview: await renderToml(env, record, false) });
+        return json({ answer: publicAnswer(record), preview: await renderToml(env, record, false), problems: await problemsFor(env, record) });
       }
       if (method === "PUT") {
         const body = (await request.json()) as { doc: any; settings?: any };
@@ -159,7 +163,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
           identity.email,
         );
         await audit(env, identity.email, "answer.save", name, saved.has_secrets ? `holds ${secretKeysIn(saved.doc).join(", ")}` : "");
-        return json({ answer: publicAnswer(saved), preview: await renderToml(env, saved, false) });
+        return json({ answer: publicAnswer(saved), preview: await renderToml(env, saved, false), problems: await problemsFor(env, saved) });
       }
       if (method === "DELETE") {
         await deleteAnswer(env, name);
@@ -216,7 +220,8 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
           },
         });
       }
-      return json({ toml, revealed: reveal, secret_keys: secretKeysIn(await mergedDocFor(env, record)) });
+      const merged = await mergedDocFor(env, record);
+      return json({ toml, revealed: reveal, secret_keys: secretKeysIn(merged), problems: lintMerged(merged) });
     }
 
     return json({ error: "method not allowed" }, 405);
@@ -257,6 +262,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
       would_serve: decision.allowed,
       reason: decision.reason,
       toml: emitToml(selection.merged, { redact: true, redactionText: REDACTION }),
+      problems: lintMerged(selection.merged),
     });
   }
 

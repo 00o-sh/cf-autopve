@@ -98,13 +98,23 @@ export function ipAllowed(ip: string, cidrs: string[]): boolean {
 /* ---------------------------- Serve token -------------------------- */
 
 /**
- * When SERVE_TOKEN is set, the installer must present it either as a path
- * segment (POST /answer/<token>) or as an X-AutoPVE-Token header. The path form
- * exists because the Proxmox installer only lets you configure a URL.
+ * When SERVE_TOKEN is set, the installer must present it in one of these:
+ *
+ *   - Authorization: Bearer <name>:<token>  what `prepare-iso --answer-auth-token
+ *     <name>:<token>` makes the installer send (PVE 9.2+); `Bearer <token>` works too
+ *   - X-AutoPVE-Token: <token>
+ *   - a path segment, POST /answer/<token>, for installers that can only be
+ *     given a URL. It ends up in URLs and logs, so prefer the header.
  */
 export function tokenOk(env: Env, request: Request, pathToken: string | null): boolean {
   const expected = env.SERVE_TOKEN;
   if (!expected) return true;
+  const bearer = request.headers.get("Authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1];
+  if (bearer) {
+    if (timingSafeEqual(bearer, expected)) return true;
+    const colon = bearer.indexOf(":");
+    if (colon > 0 && timingSafeEqual(bearer.slice(colon + 1), expected)) return true;
+  }
   const header = request.headers.get("X-AutoPVE-Token");
   if (header && timingSafeEqual(header, expected)) return true;
   return !!pathToken && timingSafeEqual(pathToken, expected);
@@ -177,10 +187,20 @@ export async function claimServe(env: Env, record: AnswerRecord, now = Date.now(
  * with a payload of their choosing — signed with your HMAC secret. Relays are
  * therefore refused outright until a token is configured.
  */
-export function hookAllowed(env: Env, request: Request, pathToken: string | null): Decision {
+export function hookAllowed(env: Env, request: Request, pathToken: string | null, bodyToken: unknown = null): Decision {
   if (!env.SERVE_TOKEN) return deny("relays are disabled until a SERVE_TOKEN is configured on this deployment");
+  if (bodyTokenOk(env, bodyToken)) return ALLOW;
   if (!tokenOk(env, request, pathToken)) return deny("serve token missing or incorrect");
   return ALLOW;
+}
+
+/**
+ * The webhook's `auth-token` (PVE 9.2+) arrives as a top-level `token` field
+ * in the JSON body. Set it to the SERVE_TOKEN and /hook needs no token in the
+ * URL. The field is stripped before the payload is relayed or stored.
+ */
+export function bodyTokenOk(env: Env, bodyToken: unknown): boolean {
+  return !!env.SERVE_TOKEN && typeof bodyToken === "string" && timingSafeEqual(bodyToken, env.SERVE_TOKEN);
 }
 
 export async function armAnswer(env: Env, name: string, minutes: number, serves: number | null): Promise<void> {

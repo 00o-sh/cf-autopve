@@ -71,8 +71,13 @@ If you do host:
    such answers unless `ALLOW_ALWAYS_SECRETS=true`. The serve count is spent atomically in D1 *before*
    anything is decrypted, so a burst of concurrent fetches against an answer armed for one serve gets
    exactly one answer; the rest are refused and recorded.
-4. **Source restrictions.** Per-answer IP/CIDR allowlist, an optional deployment-wide `SERVE_TOKEN`
-   (`POST /answer/<token>` or the `X-AutoPVE-Token` header), and a per-IP rate limit. The allowlist is
+4. **Source restrictions.** Per-answer IP/CIDR allowlist, an optional deployment-wide `SERVE_TOKEN`,
+   and a per-IP rate limit. The token can be sent in any of these ways, best first:
+   - `Authorization: Bearer <name>:<token>`, which the installer sends when the ISO is built with
+     `--answer-auth-token` (PVE 9.2+)
+   - the `X-AutoPVE-Token` header
+   - a path segment, `POST /answer/<token>`, for older installers that only take a URL. This puts the
+     token in URLs and logs. The allowlist is
    the only per-answer access control: **filters are for routing, not security** (see
    [Answers](#answers)).
 5. **HTTPS required.** Credentials are never served over plain HTTP (`REQUIRE_HTTPS`, default on).
@@ -197,6 +202,22 @@ Across inheritance, whichever alternative an answer sets replaces Default's. For
 using `root-password-hashed` drops Default's `root-password`, and one switching to `from-dhcp` drops
 Default's static addressing.
 
+#### What the installer will actually receive
+
+An answer can be valid on its own and still combine with Default into something the installer rejects.
+For example, an answer that adds a static `cidr` while Default says `from-dhcp`. The merged answer is
+checked against the installer's rules: required keys, exactly one root password, `from-answer`
+addressing, a disk selection, `zfs.raid`/`btrfs.raid`, filesystem-specific options, and first-boot and
+webhook URLs. Problems show on the **answer.toml** tab, after Save, and in the Filters dry run. A
+served request that would fail is noted in History. The check never blocks saving or serving: it
+tells you why an install would fail before you boot.
+
+#### JSON or TOML
+
+The installer advertises both in its `Accept` header and prefers JSON. `/answer` replies with JSON
+when the request prefers it, with the same structure a TOML parser reads from the TOML answer, and with
+TOML (as `text/plain`, as before) otherwise. Set `ANSWER_FORMAT = "toml"` to always send TOML.
+
 Point the installer at it by building an ISO with `scripts/build-iso.sh`. It downloads the PVE release
 (newest by default) from Proxmox, checks it against their `SHA256SUMS`, and runs
 `proxmox-auto-install-assistant prepare-iso` with your answer URL. When the assistant and `xorriso`
@@ -209,12 +230,16 @@ scripts/build-iso.sh --url https://autopve.example.com --version 9.2-1 --out /sr
 AUTOPVE_TOKEN=… scripts/build-iso.sh --url … --first-boot dns.sh    # bake a first-boot script in
 ```
 
-One ISO serves every node; rebuild only for a new PVE release or a new token. The token ends up inside
-the ISO, so treat the ISO as a secret. The equivalent manual command is:
+One ISO serves every node; rebuild only for a new PVE release or a new token. When the assistant
+supports `--answer-auth-token` (PVE 9.2+), the script uses it, so the token travels as an
+`Authorization` header and stays out of the URL. With an older assistant, or with `--token-in-url`,
+it goes in the URL path instead. Either way the token ends up inside the ISO, so treat the ISO as a
+secret. The equivalent manual command is:
 
 ```bash
-proxmox-auto-install-assistant prepare-iso pve.iso \
-  --fetch-from http --url https://autopve.example.com/answer/<SERVE_TOKEN>
+proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http \
+  --url https://autopve.example.com/answer --answer-auth-token "autopve:<SERVE_TOKEN>"
+# older assistants: --url https://autopve.example.com/answer/<SERVE_TOKEN>
 ```
 
 ### Post-installation webhook relay
@@ -224,13 +249,20 @@ so without a token anyone who guessed a relay name could trigger it with a paylo
 signed with your HMAC secret. While no token is configured, every `/hook` call is refused with
 `403 relays are disabled until a SERVE_TOKEN is configured`.
 
-Create a relay, then set it in the answer's **Post Install** section, with the token as the last path
-segment:
+Create a relay, then set it in the answer's **Post Install** section. Set `auth-token` to the
+`SERVE_TOKEN` (PVE 9.2+). The installer sends it as a top-level `token` field in the JSON body, so it
+stays out of the URL:
 
 ```toml
 [post-installation-webhook]
-url = "https://autopve.example.com/hook/deploy/<SERVE_TOKEN>"
+url = "https://autopve.example.com/hook/deploy"
+auth-token = "<SERVE_TOKEN>"
 ```
+
+The Worker removes that `token` field before relaying the payload, so your automation never sees the
+serve token. A different `auth-token` value is taken to be the receiver's own and is passed through,
+but it is never written to history. Older installers can put the token in the URL instead:
+`/hook/deploy/<SERVE_TOKEN>`. The `Authorization` and `X-AutoPVE-Token` headers work here too.
 
 When the installer finishes, it POSTs its system information here; the Worker records it and forwards it
 to the relay target in the background (retries with backoff, delivery log per relay). The body is
@@ -286,6 +318,7 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 | `FILE_MAX_BYTES` | `1000000` | largest file stored in D1 (D1's hard row limit is 2 MB) |
 | `HISTORY_MAX_BYTES` | `131072` | cap on stored `system_info` per history row |
 | `HISTORY_LIMIT` | `1000` | history rows retained |
+| `ANSWER_FORMAT` | `auto` | `auto`: JSON when the installer prefers it, else TOML; `toml`: always TOML |
 | `DEV_ALLOW_INSECURE_UI` | unset | local only; bypasses Access |
 | `ANSWER_ENC_KEY` | secret | base64 32-byte AES-256-GCM key; required to store any credential |
 | `SERVE_TOKEN` | secret | token the installer must present; optional for `/answer` and `/files`, required for `/hook` (relays are refused without it) |
@@ -296,8 +329,8 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 |---|---|---|
 | `GET /` | Access | configurator UI |
 | `/api/*` | Access | configurator API |
-| `POST /answer[/<token>]` | guards | installer fetches its answer file |
-| `POST /hook/<relay>/<token>` | `SERVE_TOKEN` (required) | post-installation webhook → relay |
+| `POST /answer[/<token>]` | guards | installer fetches its answer file (TOML, or JSON when preferred) |
+| `POST /hook/<relay>[/<token>]` | `SERVE_TOKEN` (required: body `token`, header, or path) | post-installation webhook → relay |
 | `GET /files/<name>[?t=<token>]` | guards | first-boot scripts and downloads |
 | `GET /healthz` | none | liveness |
 

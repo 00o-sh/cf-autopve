@@ -529,7 +529,8 @@ function renderFilters() {
       let parsed;
       try { parsed = JSON.parse(ta.value || "{}"); } catch { return toast("That is not valid JSON.", "bad"); }
       const r = await api("/match", { method: "POST", body: { system_info: parsed } });
-      out.textContent = `matched: ${r.matched}\nwould serve: ${r.would_serve}${r.reason ? " — " + r.reason : ""}\n\n${r.toml || ""}`;
+      const issues = r.problems?.length ? `\ninstaller would reject it:\n${r.problems.map((p) => "  - " + p).join("\n")}\n` : "";
+      out.textContent = `matched: ${r.matched}\nwould serve: ${r.would_serve}${r.reason ? " — " + r.reason : ""}\n${issues}\n${r.toml || ""}`;
     },
   })]), out);
   const col = el("div", { style: "grid-column: 1 / -1" }, [tester]);
@@ -615,13 +616,16 @@ function renderServing() {
     el("label", { class: "field" }, [el("span", { text: "Notes" }), notes]),
   ]));
 
-  const answerUrl = `${c.origin}/answer` + (c.serve_token_configured ? "/<SERVE_TOKEN>" : "");
+  const answerUrl = `${c.origin}/answer`;
+  const tokenArgs = c.serve_token_configured ? ` --answer-auth-token "autopve:<SERVE_TOKEN>"` : "";
   wrap.append(el("div", { class: "card" }, [
     el("h3", { text: "Installer endpoints" }),
-    el("p", { class: "muted", text: "Point the installer's answer fetch at this URL" + (c.serve_token_configured ? ", replacing <SERVE_TOKEN> with your token's value." : ".") }),
+    el("p", { class: "muted", text: "Point the installer's answer fetch at this URL" + (c.serve_token_configured
+      ? ". The installer sends the token as an Authorization header (prepare-iso --answer-auth-token, PVE 9.2+); older assistants can put it in the URL instead: " + answerUrl + "/<SERVE_TOKEN>."
+      : ".") }),
     el("div", { class: "url", text: answerUrl }),
-    el("p", { class: "muted", style: "margin-bottom:4px", text: "Build a matching ISO with scripts/build-iso.sh from the repo (downloads and verifies the PVE release, works on any jumpbox with docker or podman), or by hand:" }),
-    el("div", { class: "url", text: `proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http --url "${answerUrl}"` }),
+    el("p", { class: "muted", style: "margin-bottom:4px", text: "Build a matching ISO with scripts/build-iso.sh from the repo (downloads and verifies the PVE release, works on any jumpbox with docker or podman, and picks the header or URL form for you), or by hand:" }),
+    el("div", { class: "url", text: `proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http --url "${answerUrl}"${tokenArgs}` }),
     el("p", { class: "muted", text:
       "This one URL serves every answer. The installer posts its hardware details; the first answer (by match priority) " +
       "whose Filters match is returned, layered over Default. If none match, Default is served." }),
@@ -736,16 +740,30 @@ function renderSource() {
 
 /* ------------------------------- preview ----------------------------- */
 
+/** Card listing what the installer would reject in the merged answer, or null. */
+function problemCard(problems, saved = true) {
+  if (!problems || !problems.length) return null;
+  return el("div", { class: "card", style: "border-color: var(--warn)" }, [
+    el("h3", {}, [el("span", { text: "The installer would reject this answer" }), el("span", { class: "tag", text: "check" })]),
+    el("p", { class: "muted", style: "margin-top:0", text: (saved ? "As saved, " : "") + "Default merged with this answer has these problems:" }),
+    warningList(problems),
+  ]);
+}
+
 function renderPreview() {
   const a = S.answer;
   const pre = el("pre", { class: "toml", text: "loading…" });
+  const issues = el("div");
   const load = async (reveal) => {
     const r = await api(`/answers/${encodeURIComponent(a.name)}/preview` + (reveal ? "?reveal=1" : ""));
     pre.textContent = r.toml;
+    issues.innerHTML = "";
+    const card = problemCard(r.problems, true);
+    if (card) issues.append(card);
     if (reveal) toast("Credentials revealed — this is recorded in the audit log.", "warn");
   };
   load(false);
-  const wrap = el("div", { class: "card" }, [
+  const wrap = el("div", {}, [issues, el("div", { class: "card" }, [
     el("h3", { text: "answer.toml" }),
     el("p", { class: "muted", text: a.name === "Default" ? "This is the base every other answer inherits from." : "Default merged with this answer, exactly as the installer would receive it." }),
     el("div", { class: "inline", style: "margin-bottom:10px" }, [
@@ -756,7 +774,7 @@ function renderPreview() {
     ]),
     pre,
     el("p", { class: "muted", style: "margin-bottom:0", text: "Downloading includes real credentials so the file works offline. Treat it like a secret; the download is recorded in the audit log." }),
-  ]);
+  ])]);
   return wrap;
 }
 
@@ -914,8 +932,8 @@ function renderRelay() {
     el("div", { class: "card" }, [el("h3", { text: "Body template" }), tmpl]),
     el("div", { class: "card" }, [
       el("h3", { text: "Installer configuration" }),
-      el("p", { class: "muted", text: "Set this as the post-installation-webhook URL in your answer:" }),
-      el("div", { class: "url", text: `${S.boot.config.origin}/hook/${r.name}` + (S.boot.config.serve_token_configured ? "/<SERVE_TOKEN>" : "") }),
+      el("p", { class: "muted", text: "Set this as the post-installation-webhook url in your answer, and set its auth-token (PVE 9.2+) to your SERVE_TOKEN. The token then travels in the request body instead of the URL, and it is removed before the payload is relayed. Older installers: append /<SERVE_TOKEN> to the URL instead." }),
+      el("div", { class: "url", text: `${S.boot.config.origin}/hook/${r.name}` }),
       S.boot.config.serve_token_configured ? "" : el("div", { class: "banner warn", text:
         "No SERVE_TOKEN is set, so this relay will refuse every installer call. Set one: openssl rand -hex 24 | wrangler secret put SERVE_TOKEN" }),
     ]),
@@ -1063,7 +1081,8 @@ function wireGlobalButtons() {
       S.dirty = false;
       await refreshAnswerList();
       renderAnswer();
-      toast("Saved.");
+      if (r.problems?.length) toast(`Saved, but the installer would reject it as merged with Default: ${r.problems.join(" ")} See the answer.toml tab.`, "warn", 15000);
+      else toast("Saved.");
     } catch (err) {
       toast(err.message, "bad", 12000);
     }

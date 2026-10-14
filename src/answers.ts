@@ -466,6 +466,67 @@ export function mergeDocs(defaultDoc: AnswerDoc, answerDoc: AnswerDoc): AnswerDo
   return out;
 }
 
+/* ------------------------------------------------------------------ *
+ * Checking what the installer will actually receive
+ * ------------------------------------------------------------------ */
+
+const present = (v: unknown) => v !== undefined && v !== null && v !== "";
+
+/**
+ * Problems in a merged answer (Default layered under the answer) that the
+ * installer would reject. Each document can be valid on its own and still
+ * combine into something broken, e.g. an answer that adds a static `cidr`
+ * while Default says `from-dhcp`. Returned as messages, not thrown: the
+ * answer still saves, and the operator sees why the install would fail.
+ */
+export function lintMerged(doc: AnswerDoc): string[] {
+  const out: string[] = [];
+  const g = (doc.global ?? {}) as Record<string, unknown>;
+  const net = (doc.network ?? {}) as Record<string, unknown>;
+  const disk = (doc["disk-setup"] ?? {}) as Record<string, unknown>;
+  const has = (t: Record<string, unknown>, k: string) => present(t[k]);
+  const hasPrefix = (t: Record<string, unknown>, p: string) => Object.keys(t).some((k) => k.startsWith(p) && present(t[k]));
+
+  for (const k of ["keyboard", "country", "mailto", "timezone"]) if (!has(g, k)) out.push(`global.${k} is required.`);
+  if (!has(g, "fqdn") && !has(g, "fqdn.source")) out.push("global.fqdn (or fqdn.source = \"from-dhcp\") is required.");
+  const pw = ["root-password", "root-password-hashed"].filter((k) => has(g, k));
+  if (pw.length === 0) out.push("Set one of global.root-password or global.root-password-hashed.");
+  if (pw.length === 2) out.push("Set only one of global.root-password and global.root-password-hashed.");
+
+  if (!has(net, "source")) out.push("network.source is required.");
+  if (net.source === "from-dhcp") {
+    const statics = Object.keys(net).filter((k) => isStaticNetKey(k) && present(net[k]));
+    if (statics.length) out.push(`network.source is "from-dhcp", so ${statics.map((k) => `network.${k}`).join(", ")} must not be set.`);
+  }
+  if (net.source === "from-answer") {
+    for (const k of ["cidr", "dns", "gateway"]) if (!has(net, k)) out.push(`network.${k} is required with source = "from-answer".`);
+  }
+
+  const fs = disk.filesystem;
+  if (!present(fs)) out.push("disk-setup.filesystem is required.");
+  const usesList = has(disk, "disk-list");
+  const usesFilter = hasPrefix(disk, "filter.");
+  if (!usesList && !usesFilter) out.push("disk-setup needs disk-list or at least one filter.<udev property>.");
+  if (usesList && usesFilter) out.push("disk-setup uses disk-list and a filter; the installer allows only one.");
+  if (fs === "zfs" && !has(disk, "zfs.raid")) out.push('disk-setup.zfs.raid is required with filesystem = "zfs".');
+  if (fs === "btrfs" && !has(disk, "btrfs.raid")) out.push('disk-setup.btrfs.raid is required with filesystem = "btrfs".');
+  const family: Record<string, string[]> = { "zfs.": ["zfs"], "lvm.": ["ext4", "xfs"], "btrfs.": ["btrfs"] };
+  for (const [prefix, fits] of Object.entries(family)) {
+    if (present(fs) && hasPrefix(disk, prefix) && !fits.includes(String(fs))) {
+      out.push(`disk-setup has ${prefix}* options but filesystem = "${fs}"; they only apply to ${fits.join("/")}.`);
+    }
+  }
+
+  const fb = doc["first-boot"] as Record<string, unknown> | undefined;
+  if (fb && Object.keys(fb).length) {
+    if (!has(fb, "source")) out.push("first-boot.source is required when the first-boot section is used.");
+    if (fb.source === "from-url" && !has(fb, "url")) out.push('first-boot.url is required with source = "from-url".');
+  }
+  const hook = doc["post-installation-webhook"] as Record<string, unknown> | undefined;
+  if (hook && Object.keys(hook).length && !has(hook, "url")) out.push("post-installation-webhook.url is required when the section is used.");
+  return out;
+}
+
 export interface Selection {
   record: AnswerRecord;
   /** Merged document, still encrypted. */
