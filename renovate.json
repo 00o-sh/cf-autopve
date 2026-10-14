@@ -1,0 +1,54 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    ":semanticCommitsDisabled",
+    ":pinAllExceptPeerDependencies"
+  ],
+  "timezone": "America/Toronto",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "minimumReleaseAge": "3 days",
+  "internalChecksFilter": "strict",
+  "rangeStrategy": "pin",
+  "labels": ["dependencies"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"]
+  },
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "schedule": ["at any time"],
+    "minimumReleaseAge": null
+  },
+  "packageRules": [
+    {
+      "description": "Wrangler and the Workers runtime types move together; review them as one PR.",
+      "groupName": "Cloudflare Workers toolchain",
+      "matchPackageNames": ["wrangler", "@cloudflare/workers-types", "esbuild"]
+    },
+    {
+      "description": "workers-types publishes almost daily; wait a week so the group is not reopened constantly.",
+      "matchPackageNames": ["@cloudflare/workers-types"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "Non-major dev tooling updates merge on their own once CI is green.",
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "GitHub Actions digest and minor bumps merge on their own once CI is green.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "pinDigest", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "Node major bumps need a check against wrangler's supported engines.",
+      "matchDepNames": ["node"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ]
+}

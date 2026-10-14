@@ -248,11 +248,11 @@ ip2int() { local IFS=.; local -a p; read -ra p <<<"$1"; echo $(( (10#${p[0]} << 
 
 BOOTSTRAP_CONF=""
 if [ -n "$BOOT_RANGE$BOOT_GW$BOOT_DNS" ]; then
-  [ -n "$BOOT_RANGE" ] && [ -n "$BOOT_GW" ] || die "--bootstrap-range and --bootstrap-gateway go together"
+  if [ -z "$BOOT_RANGE" ] || [ -z "$BOOT_GW" ]; then die "--bootstrap-range and --bootstrap-gateway go together"; fi
   [[ "$BOOT_RANGE" =~ ^([0-9.]+)-([0-9.]+)/([0-9]+)$ ]] || die "--bootstrap-range must look like 10.0.0.240-10.0.0.249/24"
   B_START="${BASH_REMATCH[1]}"; B_END="${BASH_REMATCH[2]}"; B_PREFIX="${BASH_REMATCH[3]}"
-  is_ipv4 "$B_START" && is_ipv4 "$B_END" || die "--bootstrap-range: not IPv4 addresses"
-  [ "$B_PREFIX" -ge 1 ] && [ "$B_PREFIX" -le 32 ] || die "--bootstrap-range: prefix must be 1-32"
+  if ! is_ipv4 "$B_START" || ! is_ipv4 "$B_END"; then die "--bootstrap-range: not IPv4 addresses"; fi
+  if [ "$B_PREFIX" -lt 1 ] || [ "$B_PREFIX" -gt 32 ]; then die "--bootstrap-range: prefix must be 1-32"; fi
   is_ipv4 "$BOOT_GW" || die "--bootstrap-gateway: not an IPv4 address"
   [ "$(ip2int "$B_END")" -ge "$(ip2int "$B_START")" ] || die "--bootstrap-range: end is before start"
   B_MASK=$(( (0xffffffff << (32 - B_PREFIX)) & 0xffffffff ))
@@ -383,7 +383,7 @@ FB_ARGS=()
 
 # Sets FETCH_ARGS from what the installed assistant supports. Kept as text so
 # the container runs the identical logic.
-# shellcheck disable=SC2089,SC2090 # code as text, run with eval on both sides
+# shellcheck disable=SC2016,SC2089 # code as text, run with eval on both sides
 PICK_FETCH='
 FETCH_ARGS=(--url "$AUTOPVE_ANSWER_URL")
 if [ -n "$AUTOPVE_AUTH_TOKEN" ]; then
@@ -408,7 +408,7 @@ export PICK_FETCH
 # in order and later files replace earlier ones, so the stock initrd is left
 # intact. The ISO is edited in place the way prepare-iso does it: same boot
 # records, same volume UUID (the installer finds its medium by that UUID).
-# shellcheck disable=SC2089 # code as text, run with eval on both sides
+# shellcheck disable=SC2016,SC2089 # code as text, run with eval on both sides
 INJECT_BOOTSTRAP='
 inject_bootstrap() {
   local iso="$1" w uuid anchor
@@ -429,7 +429,7 @@ inject_bootstrap() {
   (cd "$w/x" && zstd -dcq ../initrd.img | cpio -id --quiet init) \
     || { echo "build-iso: could not unpack the initrd" >&2; return 1; }
   if [ "$(grep -cxF "$anchor" "$w/x/init")" != 1 ]; then
-    echo "build-iso: this ISO'"'"'s installer init is not one --bootstrap-range knows how to extend; build without it" >&2
+    echo "build-iso: --bootstrap-range does not recognise the installer init in this ISO; build without it" >&2
     return 1
   fi
   awk -v a="$anchor" "{ print } \$0 == a { print \"    cp -a /autopve-overlay/. /mnt/.installer-mp/ 2>/dev/null || true # autopve: bootstrap network\" }" \
