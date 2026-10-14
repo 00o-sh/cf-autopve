@@ -80,11 +80,46 @@ test("filters match on raw system information", () => {
   assert.equal(A.matches({}, raw), false, "an answer with no filters never matches");
 });
 
-test("normalisation enables NIC pinning only when a mapping exists", () => {
+test("a NIC mapping implies pinning; pinning can also be enabled on its own", () => {
   const withMap = A.normaliseDoc({ "network.interface-name-pinning.mapping": { "aa:bb:cc:dd:ee:ff": "nic0" } });
   assert.deepEqual(withMap["network.interface-name-pinning"], { enabled: true });
-  const without = A.normaliseDoc({ "network.interface-name-pinning": { enabled: true } });
-  assert.ok(!("network.interface-name-pinning" in without));
+  const enabledOnly = A.normaliseDoc({ "network.interface-name-pinning": { enabled: true } });
+  assert.deepEqual(enabledOnly["network.interface-name-pinning"], { enabled: true }, "nic0, nic1, ... naming");
+  assert.ok(!("network.interface-name-pinning.mapping" in enabledOnly));
+  const off = A.normaliseDoc({ "network.interface-name-pinning": { enabled: false } });
+  assert.ok(!("network.interface-name-pinning" in off));
+});
+
+test("keys the installer refuses together are rejected in one answer", () => {
+  assert.throws(() => A.normaliseDoc({ global: { "root-password": "a", "root-password-hashed": "$6$x" } }), /root-password and root-password-hashed/);
+  assert.throws(() => A.normaliseDoc({ global: { fqdn: "a.example.com", "fqdn.source": "from-dhcp" } }), /fqdn and fqdn.source/);
+  assert.throws(() => A.normaliseDoc({ network: { source: "from-dhcp", cidr: "10.0.0.5/24" } }), /from-dhcp.*cidr/);
+  assert.throws(() => A.normaliseDoc({ network: { source: "from-dhcp", "filter.ID_NET_NAME_MAC": "*bc" } }), /filter.ID_NET_NAME_MAC/);
+  assert.doesNotThrow(() => A.normaliseDoc({ network: { source: "from-answer", cidr: "10.0.0.5/24", "filter.ID_NET_NAME_MAC": "*bc" } }));
+});
+
+test("an answer's choice replaces Default's alternative instead of colliding with it", () => {
+  const def = {
+    global: { "root-password": "enc:v1:x:y", fqdn: "default.example.com" },
+    network: { source: "from-answer", cidr: "10.0.0.5/24", gateway: "10.0.0.1", "filter.ID_NET_NAME": "eno1" },
+  };
+  const merged = A.mergeDocs(def, {
+    global: { "root-password-hashed": "$6$abc", "fqdn.source": "from-dhcp" },
+    network: { source: "from-dhcp" },
+  });
+  assert.ok(!("root-password" in merged.global));
+  assert.equal(merged.global["root-password-hashed"], "$6$abc");
+  assert.ok(!("fqdn" in merged.global));
+  assert.equal(merged.global["fqdn.source"], "from-dhcp");
+  assert.deepEqual(merged.network, { source: "from-dhcp" });
+});
+
+test("PVE 9.x options are catalogued: subscription key and webhook auth token are credentials", () => {
+  assert.equal(A.isSecretKey("global", "subscription-key"), true);
+  assert.equal(A.isSecretKey("post-installation-webhook", "auth-token"), true);
+  assert.equal(A.checkValue("disk-setup", "zfs.compress", "lz4"), null);
+  assert.match(A.checkValue("disk-setup", "zfs.checksum", "md5"), /one of on, fletcher4, sha256/);
+  assert.equal(A.checkValue("disk-setup", "lvm.hdsize", 31.5), null, "sizes are GiB and may be fractional");
 });
 
 test("normalisation refuses a disk-list plus filter combination", () => {
@@ -280,6 +315,96 @@ test("relays are refused outright without a SERVE_TOKEN", () => {
   assert.equal(A.hookAllowed(env, hook, "s3cr3t").allowed, true);
   const withHeader = new Request("https://pve.example.com/hook/deploy", { method: "POST", headers: { "X-AutoPVE-Token": "s3cr3t" } });
   assert.equal(A.hookAllowed(env, withHeader, null).allowed, true);
+});
+
+/* ----------------------------- TOML import ---------------------------- */
+
+const UPSTREAM_EXAMPLE = `# provenance header, not attached to any key
+
+[global]
+keyboard = "de"
+country = "at"
+# the node's name
+fqdn = "pveauto.testinstall"
+root_password = "12345678"
+root-ssh-keys = ["ssh-ed25519 AAAA..."]
+subscription-key = "pve1c-0123456789"
+
+[network]
+source = "from-dhcp"
+
+[network.interface-name-pinning]
+enabled = true
+
+[network.interface-name-pinning.mapping]
+"24:8a:07:1e:05:bc" = "lan0"
+
+[disk_setup]
+filesystem = "zfs"
+zfs.raid = "raid1"
+zfs.arc_max = 2048
+# Kioxia only
+filter.ID_SERIAL = "KIOXIA*"
+
+[post-installation-webhook]
+url = "https://my.endpoint.local/postinst"
+auth-token = "secret-token"
+
+[first-boot]
+source = "from-iso"
+ordering = "before-network"
+
+[mystery]
+x = 1
+`;
+
+test("an existing answer.toml imports into the flat dotted-key model", () => {
+  const { doc, warnings } = A.parseAnswerToml(UPSTREAM_EXAMPLE);
+  assert.equal(doc.global.fqdn, "pveauto.testinstall");
+  assert.equal(doc.global["root-password"], "12345678", "snake_case renamed");
+  assert.equal(doc.global["subscription-key"], "pve1c-0123456789");
+  assert.deepEqual(doc.global["root-ssh-keys"], ["ssh-ed25519 AAAA..."]);
+  assert.deepEqual(doc["network.interface-name-pinning"], { enabled: true });
+  assert.deepEqual(doc["network.interface-name-pinning.mapping"], { "24:8a:07:1e:05:bc": "lan0" });
+  assert.equal(doc["disk-setup"]["zfs.raid"], "raid1");
+  assert.equal(doc["disk-setup"]["zfs.arc-max"], 2048);
+  assert.equal(doc["disk-setup"]["filter.ID_SERIAL"], "KIOXIA*", "udev property names keep their underscores");
+  assert.equal(doc["post-installation-webhook"]["auth-token"], "secret-token");
+  assert.equal(doc["first-boot"].ordering, "before-network");
+  assert.ok(!("mystery" in doc));
+  assert.ok(warnings.some((w) => /\[mystery\]/.test(w)));
+  assert.ok(warnings.some((w) => /root_password → global.root-password/.test(w)));
+  assert.ok(warnings.some((w) => /\[disk_setup\] → \[disk-setup\]/.test(w)));
+});
+
+test("comments directly above a key survive import; header comments do not attach", () => {
+  const { doc } = A.parseAnswerToml(UPSTREAM_EXAMPLE);
+  assert.deepEqual(doc.comments.global, { fqdn: "the node's name" });
+  assert.deepEqual(doc.comments["disk-setup"], { "filter.ID_SERIAL": "Kioxia only" });
+});
+
+test("fqdn written as a table imports as fqdn.source / fqdn.domain", () => {
+  const { doc } = A.parseAnswerToml(`[global]\nfqdn.source = "from-dhcp"\nfqdn.domain = "example.com"\n`);
+  assert.deepEqual(doc.global, { "fqdn.source": "from-dhcp", "fqdn.domain": "example.com" });
+  const inline = A.parseAnswerToml(`[global]\nfqdn = { source = "from-dhcp", domain = "example.com" }\n`).doc;
+  assert.deepEqual(inline.global, { "fqdn.source": "from-dhcp", "fqdn.domain": "example.com" });
+});
+
+test("import -> emit -> import is stable, including comments and the secret marker", () => {
+  const first = A.parseAnswerToml(UPSTREAM_EXAMPLE).doc;
+  first.global["root-password"] = A.MASK_MARKER;
+  const second = A.parseAnswerToml(A.emitToml(first)).doc;
+  assert.deepEqual(second, first);
+  // The marker then resolves to the stored ciphertext on save.
+  const restored = A.unmaskDoc(second, { global: { "root-password": "enc:v1:aa:bb" } });
+  assert.equal(restored.global["root-password"], "enc:v1:aa:bb");
+});
+
+test("broken TOML is refused with the parser's reason; invalid values still load for fixing", () => {
+  assert.throws(() => A.parseAnswerToml(`[global\nkeyboard = "de"`), /Not valid TOML/);
+  const { doc, warnings } = A.parseAnswerToml(`[global]\nkeyboard = "klingon"\n`);
+  assert.equal(doc.global.keyboard, "klingon");
+  assert.ok(warnings.some((w) => /global.keyboard is not a recognised value|must be one of/.test(w)));
 });
 
 /* ------------------------------- relay ------------------------------- */

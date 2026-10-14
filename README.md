@@ -156,6 +156,47 @@ History and see which answer would win and whether it would actually be served.
 > If two nodes must not be able to get each other's credentials, give each answer an allowlist and arm
 > it only while that node is installing.
 
+#### Importing and editing as TOML
+
+- **import** (sidebar) creates a new answer from an existing `answer.toml`.
+- **Edit TOML** (answer tab) shows the keys that answer sets as a plain `answer.toml`. Edit it, paste
+  over it, or *Load file…*, then *Apply to editor* and Save as usual. Every check that applies to the
+  form applies here too.
+
+Either way, the file is parsed with a real TOML parser and mapped onto the editor:
+
+- Deprecated `snake_case` keys (PVE 9.0+ warns about them) are renamed to kebab-case, for example
+  `root_password` → `root-password` and `[disk_setup]` → `[disk-setup]`. udev property names under
+  `filter.` keep their underscores.
+- A `# comment` line directly above a key is kept as that key's comment and written back out.
+- Sections and keys the installer doesn't understand are listed and dropped, not guessed at.
+- Stored credentials show as `__autopve_secret_set__`. Leave the marker to keep the stored value, or
+  replace it to set a new one; plaintext never comes back from the server.
+- An imported answer that holds credentials is switched to `armed` and still needs the acknowledgement
+  on the Serving tab before it saves.
+
+Filters (`must_contain` / `must_not_contain`) are configurator metadata, not part of the file, and are
+left as they are.
+
+#### Answer file coverage
+
+The key catalogue follows the current
+[Proxmox Automated Installation](https://pve.proxmox.com/wiki/Automated_Installation) reference,
+including `global.subscription-key` and `post-installation-webhook.auth-token` (PVE 9.2+, both treated
+as credentials), NIC name pinning with or without a MAC mapping (PVE 9.1+), and the documented udev
+filter properties for disks and NICs. Any other udev property also works as `filter.<NAME>`.
+
+Combinations the installer rejects are refused on save, with the reason:
+
+- `root-password` together with `root-password-hashed`
+- `fqdn` together with `fqdn.source` / `fqdn.domain`
+- `disk-list` together with a disk filter
+- `network.source = "from-dhcp"` together with `cidr`, `dns`, `gateway` or a NIC filter
+
+Across inheritance, whichever alternative an answer sets replaces Default's. For example, an answer
+using `root-password-hashed` drops Default's `root-password`, and one switching to `from-dhcp` drops
+Default's static addressing.
+
 Point the installer at it by building an ISO with `scripts/build-iso.sh`. It downloads the PVE release
 (newest by default) from Proxmox, checks it against their `SHA256SUMS`, and runs
 `proxmox-auto-install-assistant prepare-iso` with your answer URL. When the assistant and `xorriso`
@@ -272,6 +313,7 @@ src/
   crypto.ts    AES-256-GCM envelope encryption, HMAC, token compare
   relay.ts     outbound webhook relay, templating, delivery log
   toml.ts      answer.toml writer + value coercion
+  tomlimport.ts  answer.toml reader for import and the raw editor (snake_case migration, comments)
   schema.ts    the Proxmox key catalogue (ported from settings.py)
   files.ts     D1/R2 file hosting + credential scanning
   db.ts        history, audit, rate limiting, sysinfo key learning

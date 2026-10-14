@@ -221,23 +221,59 @@ export function normaliseDoc(input: AnswerDoc): AnswerDoc {
     ? input.must_not_contain.filter((s: unknown) => typeof s === "string" && s.trim() !== "")
     : [];
 
-  // Enabling NIC pinning is implied by having a mapping.
+  // NIC pinning: a mapping implies enabled; enabled on its own is also valid
+  // (the installer then names every NIC nic0, nic1, ...).
   const mapping = out["network.interface-name-pinning.mapping"] as Record<string, unknown> | undefined;
-  if (mapping && Object.keys(mapping).length > 0) {
-    out["network.interface-name-pinning"] = { enabled: true };
-  } else {
-    delete out["network.interface-name-pinning"];
-    delete out["network.interface-name-pinning.mapping"];
-  }
+  const hasMapping = !!mapping && Object.keys(mapping).length > 0;
+  const pinning = out["network.interface-name-pinning"] as Record<string, unknown> | undefined;
+  if (hasMapping || pinning?.enabled === true) out["network.interface-name-pinning"] = { enabled: true };
+  else delete out["network.interface-name-pinning"];
+  if (!hasMapping) delete out["network.interface-name-pinning.mapping"];
 
-  const disk = out["disk-setup"] as Record<string, unknown> | undefined;
-  if (disk && "disk-list" in disk && Object.keys(disk).some((k) => k.startsWith("filter"))) {
-    throw new ValidationError("disk-setup cannot use disk-list and a filter at the same time.");
+  for (const [section, groups] of Object.entries(EXCLUSIVE)) {
+    const table = out[section] as Record<string, unknown> | undefined;
+    if (!table) continue;
+    for (const group of groups) {
+      const used = group.filter((alt) => Object.keys(table).some(alt.has));
+      if (used.length > 1) throw new ValidationError(`${section} cannot use ${used.map((a) => a.label).join(" and ")} at the same time.`);
+    }
+  }
+  const net = out.network as Record<string, unknown> | undefined;
+  if (net?.source === "from-dhcp") {
+    const statics = Object.keys(net).filter(isStaticNetKey);
+    if (statics.length) {
+      throw new ValidationError(`network: with source = "from-dhcp" the installer rejects ${statics.join(", ")}. Use source = "from-answer" or remove them.`);
+    }
   }
 
   const comments = normaliseComments(input.comments, out);
   if (Object.keys(comments).length) out.comments = comments;
   return out;
+}
+
+interface Alternative {
+  label: string;
+  has: (key: string) => boolean;
+}
+
+const only = (k: string): Alternative => ({ label: k, has: (key) => key === k });
+const family = (prefix: string, label: string): Alternative => ({ label, has: (key) => key.startsWith(prefix) });
+
+/**
+ * Keys the installer refuses to see together. Within a document that is a
+ * validation error; across inheritance, whichever alternative the answer sets
+ * replaces the other one in Default.
+ */
+const EXCLUSIVE: Record<string, Alternative[][]> = {
+  global: [
+    [only("root-password"), only("root-password-hashed")],
+    [only("fqdn"), family("fqdn.", "fqdn.source/fqdn.domain")],
+  ],
+  "disk-setup": [[only("disk-list"), family("filter", "a filter")]],
+};
+
+function isStaticNetKey(key: string): boolean {
+  return key === "cidr" || key === "dns" || key === "gateway" || key.startsWith("filter");
 }
 
 /** Scopes that can carry comments: every TOML section, plus the two filter lists. */
@@ -396,17 +432,22 @@ export function mergeDocs(defaultDoc: AnswerDoc, answerDoc: AnswerDoc): AnswerDo
   for (const section of SECTION_ORDER) {
     const child = answerDoc[section];
     if (!child || typeof child !== "object" || Array.isArray(child)) continue;
-    if (section === "disk-setup") {
-      const base = (out[section] ?? {}) as Record<string, unknown>;
-      const childKeys = Object.keys(child as Record<string, unknown>);
-      if (childKeys.some((k) => k.startsWith("filter")) && "disk-list" in base) delete base["disk-list"];
-      if (childKeys.includes("disk-list")) {
-        for (const k of Object.keys(base)) if (k.startsWith("filter")) delete base[k];
+    const base = (out[section] ?? {}) as Record<string, unknown>;
+    const childKeys = Object.keys(child as Record<string, unknown>);
+    for (const group of EXCLUSIVE[section] ?? []) {
+      for (const alt of group) {
+        if (!childKeys.some(alt.has)) continue;
+        for (const other of group) {
+          if (other === alt) continue;
+          for (const k of Object.keys(base)) if (other.has(k)) delete base[k];
+        }
       }
-      out[section] = { ...base, ...(child as Record<string, unknown>) };
-      continue;
     }
-    out[section] = { ...((out[section] ?? {}) as Record<string, unknown>), ...(child as Record<string, unknown>) };
+    // An answer switching to DHCP drops Default's static addressing and NIC filter.
+    if (section === "network" && (child as Record<string, unknown>).source === "from-dhcp") {
+      for (const k of Object.keys(base)) if (isStaticNetKey(k)) delete base[k];
+    }
+    out[section] = { ...base, ...(child as Record<string, unknown>) };
   }
   // A key the answer sets carries the answer's comment (or none), never Default's.
   const comments: Record<string, Record<string, string>> = JSON.parse(JSON.stringify(defaultDoc.comments ?? {}));
