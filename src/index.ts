@@ -127,6 +127,8 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
 
   const decision = canServe(env, record, { request, ip, pathToken });
   if (!decision.allowed) return refuse(decision.reason);
+  // Never hand out an answer with a placeholder left in it.
+  if (selection.templateProblems.length) return refuse(selection.templateProblems.join(" "));
 
   // Spend the serve before decrypting anything; a lost claim means a
   // concurrent request took the last serve or the answer was disarmed.
@@ -146,6 +148,7 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
         ts: Date.now(), kind: "answer", answer: record.name, system_name: systemName(systemInfo),
         ip, outcome: "served",
         detail: [
+          selection.machine ? `machine table row ${selection.machine.row} (${selection.machine.key})` : "",
           docHasSecrets(selection.merged) ? "served with credentials" : "",
           asJson ? "as JSON" : "",
           problems.length ? `installer will likely reject it: ${problems.join(" ")}` : "",
