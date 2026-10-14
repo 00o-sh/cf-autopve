@@ -152,6 +152,7 @@ function renderSidebar() {
 
 function showPane(id) {
   for (const p of document.querySelectorAll(".pane")) p.hidden = p.id !== id;
+  if (id !== "installs-pane" && S.installsTimer) { clearInterval(S.installsTimer); S.installsTimer = null; }
 }
 
 /* ------------------------------- answers ----------------------------- */
@@ -1164,6 +1165,76 @@ function openFiles() {
   showPane("files-pane");
 }
 
+/* ------------------------------ installs ----------------------------- */
+
+function ago(ts) {
+  if (!ts) return "";
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return new Date(ts).toLocaleString();
+}
+
+const INSTALL_STATES = {
+  served: ["installing", "pill run", "An answer was served; waiting for the post-installation webhook."],
+  installed: ["installed", "pill armed", "The post-installation webhook reported back."],
+  refused: ["refused", "pill bad", "The installer asked and was turned away."],
+  no_report: ["no report", "pill secret", "Served, but the webhook never reported back. The install may have failed, or the answer has no webhook."],
+};
+
+async function loadInstalls() {
+  const body = $("#installs-body");
+  let data;
+  try { data = await api("/installs"); } catch (err) { body.innerHTML = ""; body.append(el("div", { class: "card bad", text: err.message })); return; }
+  const rows = data.installs || [];
+  const state = (r) => (r.no_report ? "no_report" : r.status);
+  const counts = {};
+  for (const r of rows) counts[state(r)] = (counts[state(r)] || 0) + 1;
+  $("#installs-count").textContent = counts.served ? `${counts.served} running` : "";
+  body.innerHTML = "";
+  body.append(el("div", { class: "card" }, [
+    el("p", { class: "muted", style: "margin-top:0", text:
+      `One row per machine: its latest answer request and whether the post-installation webhook came back. Point the answer's ` +
+      `[post-installation-webhook] url at ${S.boot.config.origin}/hook (or a relay, /hook/<name>) to get the "installed" step. ` +
+      `A machine served more than ${data.timeout_minutes} minutes ago without a report shows as "no report".` }),
+    el("div", { class: "installs-summary" }, Object.entries(INSTALL_STATES).map(([k, [label, cls]]) =>
+      el("span", { class: cls, text: `${label}: ${counts[k] || 0}` }))),
+  ]));
+  const tbody = el("tbody");
+  if (!rows.length) tbody.append(el("tr", {}, [el("td", { colspan: "6", class: "muted", text: "No installs yet. Machines appear here when they fetch an answer." })]));
+  for (const r of rows) {
+    const [label, cls, hint] = INSTALL_STATES[state(r)] || [r.status, "pill", ""];
+    tbody.append(el("tr", {}, [
+      el("td", {}, [
+        el("div", { text: r.fqdn || r.system_name || "(unnamed)" }),
+        el("div", { class: "muted mono", style: "font-size:12px; word-break:break-all", text: r.machine_id }),
+      ]),
+      el("td", { text: r.answer || "—" }),
+      el("td", {}, [el("span", { class: cls, title: hint, text: label })]),
+      el("td", { title: new Date(r.updated_at).toLocaleString(), text: ago(r.updated_at) }),
+      el("td", {}, [el("div", { text: r.ip }), r.detail ? el("div", { class: "muted", style: "font-size:12px", text: r.detail }) : null]),
+      el("td", {}, [el("button", { text: "forget", title: "Remove this machine from the dashboard", onclick: async () => {
+        await api("/installs/" + encodeURIComponent(r.machine_id), { method: "DELETE" });
+        loadInstalls();
+      } })]),
+    ]));
+  }
+  body.append(el("div", { class: "card" }, [el("table", {}, [el("thead", {}, [el("tr", {}, [
+    el("th", { text: "Machine" }), el("th", { text: "Answer" }), el("th", { text: "Status" }),
+    el("th", { text: "Last heard" }), el("th", { text: "Client" }), el("th", {}),
+  ])]), tbody])]));
+}
+
+async function openInstalls() {
+  if (S.dirty && !confirm("Discard unsaved changes?")) return;
+  S.answer = null; S.relay = null; S.dirty = false;
+  renderSidebar();
+  showPane("installs-pane");
+  await loadInstalls();
+  S.installsTimer = setInterval(() => { if (!document.hidden) loadInstalls(); }, 10000);
+}
+
 /* ----------------------------- global wiring -------------------------- */
 
 async function refreshAnswerList() {
@@ -1302,6 +1373,13 @@ function wireGlobalButtons() {
   };
 
   $("#file-add").onclick = () => $("#file-input").click();
+  $("#installs-open").onclick = openInstalls;
+  $("#installs-refresh").onclick = loadInstalls;
+  $("#installs-clear").onclick = async () => {
+    const r = await api("/installs?status=installed", { method: "DELETE" });
+    toast(`Removed ${r.removed} installed machine${r.removed === 1 ? "" : "s"}.`);
+    loadInstalls();
+  };
   $("#file-input").onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;

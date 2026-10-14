@@ -383,6 +383,110 @@ test("diff text fingerprints credentials and puts each list item on its own line
   assert.ok(!a.includes("comments"), "comments are in the TOML, not repeated as metadata");
 });
 
+/* ---------------------------- install tracking ------------------------- */
+
+// D1 over node:sqlite with every migration applied and the parts of the D1 API the Worker uses.
+async function d1Migrated() {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const dir = new URL("../migrations/", import.meta.url);
+  const db = new DatabaseSync(":memory:");
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) db.exec(readFileSync(new URL(f, dir), "utf8"));
+  const stmt = (sql, args) => ({
+    first: async () => db.prepare(sql).get(...args) ?? null,
+    run: async () => { const r = db.prepare(sql).run(...args); return { meta: { changes: Number(r.changes), last_row_id: Number(r.lastInsertRowid) } }; },
+    all: async () => ({ results: db.prepare(sql).all(...args) }),
+  });
+  const prepare = (sql) => ({ ...stmt(sql, []), bind: (...args) => stmt(sql, args) });
+  return { raw: db, prepare, batch: async (list) => Promise.all(list.map((s) => s.run())) };
+}
+
+const REQ_INFO = {
+  dmi: { system: { uuid: "6FB36FD4-77A1-4E7D-9C2A-0E5F3B1D2C4B", serial: "900030XXXX", name: "RS700" } },
+  network_interfaces: [{ link: "eno2", mac: "24:8A:07:1E:05:BD" }, { link: "eno1", mac: "24:8a:07:1e:05:bc" }],
+};
+// What the post-installation webhook sends: same DMI, kebab-case NIC list, plus the installed fqdn.
+const HOOK_INFO = {
+  fqdn: "pve1.lab.example", dmi: { system: { uuid: "6fb36fd4-77a1-4e7d-9c2a-0e5f3b1d2c4b", name: "RS700" } },
+  "network-interfaces": [{ name: "nic0", mac: "24:8a:07:1e:05:bc", address: "10.0.0.11/24" }],
+};
+
+test("machines are identified by DMI uuid, then serial, then MAC; firmware filler is skipped", () => {
+  assert.deepEqual(A.machineIds(REQ_INFO), ["uuid:6fb36fd4-77a1-4e7d-9c2a-0e5f3b1d2c4b", "serial:900030XXXX", "mac:24:8a:07:1e:05:bc", "mac:24:8a:07:1e:05:bd"]);
+  assert.deepEqual(A.machineIds({ dmi: { system: { uuid: "03000200-0400-0500-0006-000700080009", serial: "To Be Filled By O.E.M." } }, network_interfaces: [{ mac: "AA:BB:CC:DD:EE:FF" }] }), ["mac:aa:bb:cc:dd:ee:ff"]);
+  assert.deepEqual(A.machineIds({ dmi: { system: { uuid: "00000000-0000-0000-0000-000000000000", serial: "Default string" } } }), []);
+  assert.deepEqual(A.macsOf(HOOK_INFO), ["24:8a:07:1e:05:bc"], "the webhook's network-interfaces are read too");
+});
+
+test("an install goes served -> installed, and a reinstall starts over", async () => {
+  const env = { DB: await d1Migrated() };
+  await A.trackAnswer(env, REQ_INFO, { answer: "rack", status: "served", detail: "", ip: "10.0.0.50", systemName: "RS700" });
+  let [row] = await A.listInstalls(env);
+  assert.equal(row.machine_id, "uuid:6fb36fd4-77a1-4e7d-9c2a-0e5f3b1d2c4b");
+  assert.equal(row.status, "served");
+  assert.equal(row.no_report, false);
+  await A.trackInstalled(env, HOOK_INFO, { ip: "10.0.0.11", systemName: "RS700", detail: "reported" });
+  const all = await A.listInstalls(env);
+  assert.equal(all.length, 1, "the webhook is filed against the same machine");
+  [row] = all;
+  assert.equal(row.status, "installed");
+  assert.equal(row.fqdn, "pve1.lab.example");
+  assert.equal(row.answer, "rack", "the answer it was served is kept");
+  assert.ok(row.installed_at >= row.served_at);
+  await A.trackAnswer(env, REQ_INFO, { answer: "rack", status: "served", detail: "", ip: "10.0.0.50", systemName: "RS700" });
+  [row] = await A.listInstalls(env);
+  assert.equal(row.status, "served");
+  assert.equal(row.installed_at, null, "a new install clears the old result");
+});
+
+test("a served machine that never reports back shows as no report", async () => {
+  const env = { DB: await d1Migrated(), INSTALL_TIMEOUT_MINUTES: "30" };
+  await A.trackAnswer(env, REQ_INFO, { answer: "rack", status: "served", detail: "", ip: "", systemName: "" });
+  env.DB.raw.exec(`UPDATE installs SET served_at = ${Date.now() - 31 * 60_000}`);
+  assert.equal((await A.listInstalls(env))[0].no_report, true);
+});
+
+test("a webhook from a machine never served here still gets a row; the table is bounded", async () => {
+  const env = { DB: await d1Migrated(), INSTALLS_LIMIT: "2" };
+  for (const mac of ["aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02", "aa:bb:cc:00:00:03"]) {
+    await A.trackInstalled(env, { "network-interfaces": [{ mac }] }, { ip: "", systemName: "", detail: "reported" });
+  }
+  const rows = await A.listInstalls(env);
+  assert.deepEqual(rows.map((r) => [r.machine_id, r.status, r.answer]), [["mac:aa:bb:cc:00:00:03", "installed", null], ["mac:aa:bb:cc:00:00:02", "installed", null]]);
+});
+
+test("through the Worker: /answer marks a machine served, POST /hook marks it installed", async () => {
+  const DB = await d1Migrated();
+  const now = Date.now();
+  DB.raw.prepare("INSERT INTO answers (name, doc, priority, serve_mode, created_at, updated_at) VALUES ('Default', ?, 1000, 'always', ?, ?)")
+    .run(JSON.stringify({ global: { keyboard: "de" } }), now, now);
+  const env = { DB, SERVE_TOKEN: "s3cr3t" };
+  const pending = [];
+  const ctx = { waitUntil: (p) => pending.push(p) };
+  const post = (path, body, headers = {}) => A.worker.fetch(new Request(`https://pve.example.com${path}`, { method: "POST", body: JSON.stringify(body), headers }), env, ctx);
+
+  const denied = await post("/answer", REQ_INFO);
+  assert.equal(denied.status, 403);
+  await Promise.all(pending.splice(0));
+  assert.equal((await A.listInstalls(env)).length, 0, "a caller without the token leaves no dashboard row");
+
+  const wrongAnswer = await post("/answer", REQ_INFO, { Authorization: "Bearer autopve:s3cr3t" });
+  assert.equal(wrongAnswer.status, 200);
+  await Promise.all(pending.splice(0));
+  assert.equal((await A.listInstalls(env))[0].status, "served");
+
+  assert.equal((await post("/hook", HOOK_INFO)).status, 403, "/hook needs the token too");
+  const hook = await post("/hook", { ...HOOK_INFO, token: "s3cr3t" });
+  assert.equal(hook.status, 202);
+  await Promise.all(pending.splice(0));
+  const [row] = await A.listInstalls(env);
+  assert.equal(row.status, "installed");
+  assert.equal(row.answer, "Default");
+  const hist = DB.raw.prepare("SELECT kind, outcome, system_info FROM history ORDER BY id DESC LIMIT 1").get();
+  assert.equal(hist.outcome, "recorded");
+  assert.ok(!hist.system_info.includes("s3cr3t"), "the token never lands in history");
+});
+
 /* ------------------------------ hook guard ---------------------------- */
 
 test("relays are refused outright without a SERVE_TOKEN", () => {

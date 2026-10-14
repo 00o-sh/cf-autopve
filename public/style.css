@@ -175,3 +175,6 @@ textarea.toml-edit { width: 100%; min-height: 420px; font-size: 13px; line-heigh
 .diff .diff-del { color: #ffadb3; background: rgba(248, 81, 73, 0.18); }
 .diff .diff-fold { color: var(--muted); font-style: italic; }
 td.bad { color: var(--bad); }
+.installs-summary { display: flex; gap: 8px; flex-wrap: wrap; }
+.pill.run { border-color: #4aa3df; color: #a8d8ff; }
+.pill.bad { border-color: #e5484d; color: #ffadb3; }

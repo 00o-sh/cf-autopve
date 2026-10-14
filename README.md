@@ -462,6 +462,35 @@ if not hmac.compare_digest(expected, sig.removeprefix("sha256=")) or abs(time.ti
 The target must be reachable from Cloudflare's network — a LAN address is rejected with an explanation.
 Put a Cloudflare Tunnel in front of an internal runner if that is where the work happens.
 
+### Install tracking
+
+The **Installs** dashboard (sidebar) shows one row per machine and how far its latest install got:
+
+| status | meaning |
+| --- | --- |
+| installing | an answer was served; waiting for the post-installation webhook |
+| installed | the webhook reported back (shows the installed `fqdn`) |
+| no report | served more than `INSTALL_TIMEOUT_MINUTES` (120) ago and nothing came back |
+| refused | the installer asked and was turned away; the reason is shown |
+
+The installer has no failure callback, so a failed install shows up as *no report*. To get the
+*installed* step, point the answer's webhook at the Worker. With no relay to run, plain `/hook` just
+records the result:
+
+```toml
+[post-installation-webhook]
+url = "https://autopve.example.com/hook"
+auth-token = "<SERVE_TOKEN>"
+```
+
+A relay URL (`/hook/<name>`) records it too, before relaying. Both need the `SERVE_TOKEN`.
+
+Machines are identified by DMI system UUID, then serial, then lowest MAC, skipping firmware filler
+like `To Be Filled By O.E.M.` or all-zero UUIDs, so the answer request and the webhook land on the same
+row. Refusals only create a row when the request carried the serve token: anyone can POST a made-up
+machine to `/answer`, and that must not fill the dashboard. The table keeps the `INSTALLS_LIMIT` (2000)
+most recently heard machines. Tracking needs migration `0003`; without it installs still work.
+
 ### First-boot files
 
 Upload under **Files**; reference from an answer:
@@ -490,6 +519,8 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 | `HISTORY_MAX_BYTES` | `131072` | cap on stored `system_info` per history row |
 | `HISTORY_LIMIT` | `1000` | history rows retained |
 | `ANSWER_VERSIONS_KEEP` | `50` | saved versions kept per answer (Versions tab) |
+| `INSTALL_TIMEOUT_MINUTES` | `120` | after this long without a webhook, a served machine shows as *no report* |
+| `INSTALLS_LIMIT` | `2000` | machines kept on the Installs dashboard |
 | `ANSWER_FORMAT` | `auto` | `auto`: JSON when the installer prefers it, else TOML; `toml`: always TOML |
 | `DEV_ALLOW_INSECURE_UI` | unset | local only; bypasses Access |
 | `ANSWER_ENC_KEY` | secret | base64 32-byte AES-256-GCM key; required to store any credential |
@@ -503,6 +534,7 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 | `/api/*` | Access | configurator API |
 | `POST /answer[/<token>]` | guards | installer fetches its answer file (TOML, or JSON when preferred) |
 | `POST /hook/<relay>[/<token>]` | `SERVE_TOKEN` (required: body `token`, header, or path) | post-installation webhook → relay |
+| `POST /hook` | `SERVE_TOKEN` (required: body `token` or header) | post-installation webhook → Installs dashboard only |
 | `GET /files/<name>[?t=<token>]` | guards | first-boot scripts and downloads |
 | `GET /healthz` | none | liveness |
 
@@ -523,6 +555,7 @@ src/
   schema.ts    the Proxmox key catalogue (ported from settings.py)
   files.ts     D1/R2 file hosting + credential scanning
   db.ts        history, audit, rate limiting, sysinfo key learning
+  installs.ts  install tracking per machine (Installs dashboard)
 public/        the configurator (no build step, no external assets, strict CSP)
 migrations/    D1 schema
 test/          logic.test.js (functions) and worker.test.js (the bundled Worker in workerd, real D1)
