@@ -6,3 +6,4 @@ export { encryptString, decryptString, hmacSha256Hex, timingSafeEqual } from "..
 export { scanForSecrets } from "../src/files";
 export { isSecretKey } from "../src/schema";
 export { checkValue, FORMATS } from "../src/validate";
+export { parseAnswerToml } from "../src/tomlimport";

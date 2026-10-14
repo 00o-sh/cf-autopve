@@ -151,6 +151,7 @@ async function openAnswer(name) {
   S.answer = data.answer;
   S.relay = null;
   S.dirty = false;
+  S.tomlDraft = null;
   S.tab = S.tab === "history" || S.tab === "preview" || S.tab === "serving" || S.tab === "filters" ? S.tab : "global";
   if (S.answer.name === "Default" && S.tab === "filters") S.tab = "global";
   renderSidebar();
@@ -179,7 +180,7 @@ function renderAnswer() {
   tabs.innerHTML = "";
   const defs = S.boot.schema.sections.map((s) => [s.id, s.label]);
   if (a.name !== "Default") defs.push(["filters", "Filters"]);
-  defs.push(["serving", "Serving & risk"], ["preview", "answer.toml"], ["history", "History"]);
+  defs.push(["source", "Edit TOML"], ["serving", "Serving & risk"], ["preview", "answer.toml"], ["history", "History"]);
   for (const [id, label] of defs) {
     tabs.append(el("button", {
       class: S.tab === id ? "active" : "",
@@ -192,6 +193,7 @@ function renderAnswer() {
   const section = S.boot.schema.sections.find((s) => s.id === S.tab);
   if (section) body.append(renderSection(section));
   else if (S.tab === "filters") body.append(renderFilters());
+  else if (S.tab === "source") body.append(renderSource());
   else if (S.tab === "serving") body.append(renderServing());
   else if (S.tab === "preview") body.append(renderPreview());
   else if (S.tab === "history") body.append(renderHistory());
@@ -232,9 +234,22 @@ function renderSection(section) {
     markDirty(); renderAnswer();
   };
 
+  let pinToggle = null;
+  if (section.id === "network.interface-name-pinning.mapping") {
+    const pinning = sectionTable("network.interface-name-pinning");
+    const box = el("input", {
+      type: "checkbox", id: "pin-enabled",
+      checked: pinning.enabled === true || Object.keys(table).length > 0,
+      disabled: Object.keys(table).length > 0,
+      onchange: (e) => { if (e.target.checked) pinning.enabled = true; else delete pinning.enabled; markDirty(); },
+    });
+    pinToggle = el("div", { class: "checkline" }, [box, el("label", { for: "pin-enabled", text: "Enable interface name pinning" + (Object.keys(table).length ? " (implied by the mapping below)" : "") })]);
+  }
+
   wrap.append(el("div", { class: "card" }, [
     el("h3", { text: section.label + "  " }),
     section.help ? el("p", { class: "muted", text: section.help, style: "margin-top:0" }) : null,
+    pinToggle,
     el("div", { class: "adder" }, [el("div", {}, [input, datalist, hint]), el("button", { text: "Add key", onclick: add })]),
   ]));
 
@@ -243,7 +258,7 @@ function renderSection(section) {
   if (!entries.length) rows.append(el("p", { class: "muted", text: "Nothing set in this section." }));
   for (const [key, value] of entries) {
     const def = section.keys[key] || {};
-    const isSecret = !!def.secret || /(^|[-_.])(password|passwd|secret|token|api[-_]?key|private[-_]?key)([-_.]|$)/i.test(key);
+    const isSecret = isSecretField(section.id, key);
     const stored = value === MASK;
     const err = el("div", { class: "fielderr" });
     const showProblem = (v) => {
@@ -614,6 +629,111 @@ function renderServing() {
   return wrap;
 }
 
+/* ------------------------------ raw TOML ----------------------------- */
+
+const SECRET_KEY_RE = /(^|[-_.])(password|passwd|secret|token|api[-_]?key|private[-_]?key)([-_.]|$)/i;
+
+/** Mirrors isSecretKey() in src/schema.ts. */
+function isSecretField(sectionId, key) {
+  const def = S.boot.schema.sections.find((s) => s.id === sectionId)?.keys?.[key];
+  return !!def?.secret || SECRET_KEY_RE.test(key);
+}
+
+function docHoldsSecrets(doc) {
+  return S.boot.schema.order.some((sec) =>
+    Object.entries(doc[sec] || {}).some(([k, v]) => v !== "" && v !== null && v !== undefined && isSecretField(sec, k)));
+}
+
+/**
+ * Replace the editor's document with a parsed one, keeping the answer's
+ * filters. Returns notes for the user about settings that had to change.
+ */
+function applyParsedDoc(parsed) {
+  const old = S.answer.doc;
+  const comments = { ...(parsed.comments || {}) };
+  for (const scope of ["must_contain", "must_not_contain"]) if (old.comments?.[scope]) comments[scope] = old.comments[scope];
+  S.answer.doc = { ...parsed, must_contain: old.must_contain || [], must_not_contain: old.must_not_contain || [], comments };
+  markDirty();
+  const notes = [];
+  if (docHoldsSecrets(S.answer.doc)) {
+    if (S.answer.serve_mode === "always" && !S.boot.config.allow_always_secrets) {
+      S.answer.serve_mode = "armed";
+      notes.push('It holds credentials, so its serve mode was switched from "always" to "armed".');
+    }
+    if (!S.answer.secrets_ack) notes.push("Acknowledge credential hosting on the Serving & risk tab before saving.");
+  }
+  return notes;
+}
+
+function warningList(warnings) {
+  if (!warnings || !warnings.length) return null;
+  return el("ul", { class: "warnlist" }, warnings.map((w) => el("li", { text: w })));
+}
+
+function renderSource() {
+  const a = S.answer;
+  const area = el("textarea", {
+    class: "toml-edit", spellcheck: "false", rows: "24", "aria-label": "answer.toml source",
+    oninput: (e) => { S.tomlDraft = e.target.value; status.textContent = "edited — not applied yet"; },
+  });
+  const status = el("span", { class: "muted" });
+  const notes = el("div");
+  const load = async () => {
+    const r = await api("/toml/render", { method: "POST", body: { doc: a.doc } });
+    area.value = r.toml;
+    S.tomlDraft = null;
+    status.textContent = "";
+    notes.innerHTML = "";
+  };
+  if (S.tomlDraft !== null && S.tomlDraft !== undefined) { area.value = S.tomlDraft; status.textContent = "edited — not applied yet"; }
+  else load();
+
+  const apply = async () => {
+    try {
+      const r = await api("/toml/parse", { method: "POST", body: { toml: area.value } });
+      const extra = applyParsedDoc(r.doc);
+      S.tomlDraft = null;
+      notes.innerHTML = "";
+      const all = [...(r.warnings || []), ...extra];
+      const w = warningList(all);
+      if (w) notes.append(el("p", { class: "muted", text: "Applied, with notes:" }), w);
+      toast("Applied to the editor. Review the tabs, then Save.", all.length ? "warn" : "ok");
+      $("#answer-save").textContent = "Save •";
+      status.textContent = "applied — not saved yet";
+    } catch (err) {
+      toast(err.message, "bad", 12000);
+    }
+  };
+  const fileInput = el("input", {
+    type: "file", accept: ".toml,text/plain,application/toml", hidden: true,
+    onchange: async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      area.value = await f.text();
+      S.tomlDraft = area.value;
+      status.textContent = `loaded ${f.name} — not applied yet`;
+      e.target.value = "";
+    },
+  });
+
+  return el("div", { class: "card" }, [
+    el("h3", { text: "Edit as TOML" }),
+    el("p", { class: "muted", text:
+      (a.name === "Default" ? "The base answer every other answer inherits from. " : "Only the keys this answer sets; anything not listed is inherited from Default. ") +
+      "Paste or load an existing answer.toml, edit freely, then Apply to load it into the editor and Save as usual. " +
+      `Stored credentials show as ${MASK}; leave that marker to keep them, or replace it with a new value. ` +
+      "Deprecated snake_case keys are renamed and your # comments are kept. Filters (Filters tab) are not part of the file." }),
+    el("div", { class: "inline", style: "margin-bottom:10px" }, [
+      el("button", { class: "primary", text: "Apply to editor", onclick: apply }),
+      el("button", { text: "Load file…", onclick: () => fileInput.click() }), fileInput,
+      el("button", { text: "Reset", title: "Discard edits here and re-render from the editor", onclick: load }),
+      status,
+    ]),
+    area,
+    notes,
+  ]);
+}
+
 /* ------------------------------- preview ----------------------------- */
 
 function renderPreview() {
@@ -869,6 +989,31 @@ function wireGlobalButtons() {
     const r = await api("/answers", { method: "POST", body: { name } });
     await refreshAnswerList();
     openAnswer(r.answer.name);
+  };
+  $("#answer-import").onclick = () => $("#answer-import-input").click();
+  $("#answer-import-input").onchange = async (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    if (S.dirty && !confirm("Discard unsaved changes?")) return;
+    let parsed;
+    try {
+      parsed = await api("/toml/parse", { method: "POST", body: { toml: await f.text() } });
+    } catch (err) { return toast(err.message, "bad", 12000); }
+    const name = await ask("Import answer.toml", `Create a new answer from ${f.name}. It inherits from Default; review it, then Save.`, f.name.replace(/\.toml$/i, ""), "Import");
+    if (!name) return;
+    try {
+      const r = await api("/answers", { method: "POST", body: { name } });
+      await refreshAnswerList();
+      S.dirty = false;
+      await openAnswer(r.answer.name);
+      const extra = applyParsedDoc(parsed.doc);
+      S.tab = "global";
+      renderAnswer();
+      const all = [...(parsed.warnings || []), ...extra];
+      if (all.length) toast("Imported with notes: " + all.join(" "), "warn", 15000);
+      else toast("Imported — review it, then Save.");
+    } catch (err) { toast(err.message, "bad", 12000); }
   };
   $("#answer-copy").onclick = async () => {
     if (!S.answer) return toast("Select an answer first.", "warn");

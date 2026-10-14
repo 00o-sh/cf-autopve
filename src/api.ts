@@ -9,10 +9,11 @@ import { bool, num } from "./env";
 import { requireIdentity, type Identity } from "./access";
 import { audit, trimHistory } from "./db";
 import {
-  DEFAULT_NAME, ValidationError, deleteAnswer, decryptDoc, docHasSecrets, ensureDefaultAnswer,
-  getAnswer, listAnswers, maskDoc, mergeDocs, saveAnswer, secretKeysIn, selectAnswer, validateName,
+  DEFAULT_NAME, MASK_MARKER, ValidationError, deleteAnswer, decryptDoc, docHasSecrets, ensureDefaultAnswer,
+  getAnswer, listAnswers, maskDoc, mergeDocs, normaliseDoc, saveAnswer, secretKeysIn, selectAnswer, validateName,
   type AnswerRecord, type ServeMode,
 } from "./answers";
+import { parseAnswerToml } from "./tomlimport";
 import { armAnswer, canServe, defaultArmMinutes, disarmAnswer } from "./guards";
 import { deleteFile, listFiles, putFile, FileError, FILE_NAME_RE } from "./files";
 import { RELAY_MASK, RelayError, deleteRelay, deliver, getRelay, listRelays, maskRelay, saveRelay } from "./relay";
@@ -219,6 +220,28 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     }
 
     return json({ error: "method not allowed" }, 405);
+  }
+
+  /* -------------------------------- toml ------------------------------- */
+  // Pure conversions for the raw editor and file import; nothing is stored.
+  // Saving still goes through PUT /answers/<name> and all of its checks.
+  if (head === "toml" && parts[1] === "parse" && method === "POST") {
+    const body = (await request.json()) as { toml?: string };
+    return json(parseAnswerToml(String(body.toml ?? "")));
+  }
+  if (head === "toml" && parts[1] === "render" && method === "POST") {
+    const body = (await request.json()) as { doc?: any };
+    const doc = body.doc ?? {};
+    let shaped = doc;
+    try {
+      shaped = normaliseDoc(doc);
+    } catch {
+      // Show the document as it is; the problem is reported on save.
+    }
+    const header =
+      `only the keys this answer sets; everything else is inherited from ${DEFAULT_NAME}\n` +
+      `${MASK_MARKER} keeps a stored credential unchanged; replace it to set a new one`;
+    return json({ toml: emitToml(shaped, { header }) });
   }
 
   /* ------------------------------- match ------------------------------- */
