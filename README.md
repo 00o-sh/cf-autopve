@@ -211,10 +211,27 @@ and push protection are repository settings rather than workflows: turn them on 
 ### Answers
 
 `Default` is the base; every other answer inherits from it and overrides key by key, exactly as upstream.
-An answer is chosen by its **filters**: it matches when any *must contain* string appears in the raw JSON
-the installer POSTs, and no *must not contain* string does. First match by `priority` (then name) wins;
-no match falls back to `Default`. The Filters tab has a dry-run box — paste a `system_info` payload from
-History and see which answer would win and whether it would actually be served.
+An answer is chosen by its **filters**. First match by `priority` (then name) wins; no match falls back
+to `Default`. The Filters tab has a dry-run box — paste a `system_info` payload from History and see which
+answer would win, which rules hit (and against which values), and whether it would actually be served.
+
+**Match rules** test one field of the posted `system_info` against a glob:
+
+| field | example pattern |
+| --- | --- |
+| `network_interfaces[].mac` | `24:8a:07:1e:05:bc` |
+| `dmi.system.serial` | `9000*` |
+| `dmi.system.uuid`, `dmi.system.name`, `dmi.system.sku` | `PowerEdge R6*` |
+| `dmi.baseboard.serial`, `dmi.chassis.serial`, `dmi.chassis.asset_tag` | `ASSET-0[0-4]?` |
+| `product.product`, `iso.release` | `pve`, `9.*` |
+
+- A field is a dotted path; `[]` means "any element of this list", so the MAC rule matches if any NIC
+  has that address. Any path works, the list above is just what the editor suggests.
+- Patterns are anchored, case-insensitive globs: `*` any run, `?` one character, `[abc]` / `[!a]` sets.
+- *All rules* requires every rule to hit; *any rule* requires one.
+- The older **text filter** is still there: *must not contain* vetoes an answer whenever one of its
+  strings appears anywhere in the raw JSON. With no rules, *must contain* alone decides as before (any
+  string present). With rules, a non-empty *must contain* must also hit.
 
 > **Filters are for routing, not security.** They match against the JSON the client POSTs, and the
 > client writes that JSON. Anyone who can reach `/answer` can claim any MAC address, serial number or
@@ -259,7 +276,7 @@ Either way, the file is parsed with a real TOML parser and mapped onto the edito
 - An imported answer that holds credentials is switched to `armed` and still needs the acknowledgement
   on the Serving tab before it saves.
 
-Filters (`must_contain` / `must_not_contain`) are configurator metadata, not part of the file, and are
+Filters (`match`, `match_mode`, `must_contain`, `must_not_contain`) are configurator metadata, not part of the file, and are
 left as they are.
 
 #### Answer file coverage

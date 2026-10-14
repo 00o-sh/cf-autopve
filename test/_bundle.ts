@@ -1,5 +1,5 @@
 export { emitToml, coerceValue, encodeKey, encodeValue } from "../src/toml";
-export { mergeDocs, matches, normaliseDoc, secretKeysIn, docHasSecrets, maskDoc, unmaskDoc, MASK_MARKER, validateName } from "../src/answers";
+export { mergeDocs, matches, fieldValues, globToRegExp, evaluateRules, normaliseDoc, secretKeysIn, docHasSecrets, maskDoc, unmaskDoc, MASK_MARKER, validateName } from "../src/answers";
 export { ipMatchesCidr, ipAllowed, canServe, claimServe, hookAllowed, crossSiteWriteRefusal } from "../src/guards";
 export { renderTemplate, validateRelayUrl, handleRelayBatch, retryDelaySeconds, deliver, getRelay } from "../src/relay";
 export { encryptString, decryptString, hmacSha256Hex, timingSafeEqual } from "../src/crypto";

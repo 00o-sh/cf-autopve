@@ -843,6 +843,63 @@ test("inline delivery stops, and says so, when the next attempt would not fit th
   assert.match(log[2].error, /stopped after 2/);
 });
 
+/* ------------------------- structured match rules ---------------------- */
+
+const SYSINFO = {
+  product: { fullname: "Proxmox VE", product: "pve" },
+  dmi: { system: { serial: "900030XXXX", name: "RS700-E11 Server", uuid: "6fb36fd4-77a1" }, chassis: { serial: "I02308XXXX" } },
+  network_interfaces: [{ link: "enp6s18", mac: "00:10:20:30:40:50" }, { link: "enp6s19", mac: "24:8A:07:1E:05:BC" }],
+};
+const RAW = JSON.stringify(SYSINFO);
+
+test("field paths reach nested values and every element of a list", () => {
+  assert.deepEqual(A.fieldValues(SYSINFO, "dmi.system.serial"), ["900030XXXX"]);
+  assert.deepEqual(A.fieldValues(SYSINFO, "network_interfaces[].mac"), ["00:10:20:30:40:50", "24:8A:07:1E:05:BC"]);
+  assert.deepEqual(A.fieldValues(SYSINFO, "dmi.baseboard.serial"), [], "missing fields have no values");
+  assert.deepEqual(A.fieldValues(SYSINFO, "network_interfaces.mac"), [], "a list needs [] to be entered");
+});
+
+test("globs follow the installer's filter syntax and ignore case", () => {
+  const t = (p, v) => A.globToRegExp(p).test(v);
+  assert.equal(t("24:8a:07:*", "24:8A:07:1E:05:BC"), true);
+  assert.equal(t("node-??", "node-01"), true);
+  assert.equal(t("node-[0-4]?", "node-12"), true);
+  assert.equal(t("node-[!0-4]?", "node-12"), false);
+  assert.equal(t("a.b", "axb"), false, "dots are literal");
+  assert.equal(t("9000*", "x900030"), false, "anchored");
+});
+
+test("match rules: all (default) and any", () => {
+  const rules = [{ field: "network_interfaces[].mac", pattern: "24:8a:07:1e:05:bc" }, { field: "dmi.system.serial", pattern: "9000*" }];
+  assert.equal(A.matches({ match: rules }, RAW), true);
+  assert.equal(A.matches({ match: [...rules, { field: "dmi.system.serial", pattern: "1234*" }] }, RAW), false);
+  assert.equal(A.matches({ match: [...rules, { field: "dmi.system.serial", pattern: "1234*" }], match_mode: "any" }, RAW), true);
+  assert.equal(A.matches({ match: [{ field: "dmi.baseboard.serial", pattern: "*" }] }, RAW), false, "an absent field never matches");
+});
+
+test("text filters keep their meaning, alone and alongside rules", () => {
+  assert.equal(A.matches({ must_contain: ["RS700"] }, RAW), true);
+  assert.equal(A.matches({ must_contain: [] }, RAW), false, "no filters at all never matches");
+  const rule = [{ field: "dmi.system.serial", pattern: "9000*" }];
+  assert.equal(A.matches({ match: rule, must_not_contain: ["RS700"] }, RAW), false, "must_not_contain still vetoes");
+  assert.equal(A.matches({ match: rule, must_contain: ["nope"] }, RAW), false, "set text filters must agree");
+  assert.equal(A.matches({ match: rule, must_contain: ["RS700"] }, RAW), true);
+});
+
+test("the dry run explains each rule with the values it saw", () => {
+  const r = A.evaluateRules(SYSINFO, [{ field: "network_interfaces[].mac", pattern: "00:10:*" }, { field: "dmi.system.sku", pattern: "*" }]);
+  assert.deepEqual(r.map((x) => [x.hit, x.values]), [[true, ["00:10:20:30:40:50", "24:8A:07:1E:05:BC"]], [false, []]]);
+});
+
+test("rules are validated and normalised on save", () => {
+  const out = A.normaliseDoc({ match: [{ field: " dmi.system.serial ", pattern: " 9000* " }, { field: "", pattern: "" }], match_mode: "weird" });
+  assert.deepEqual(out.match, [{ field: "dmi.system.serial", pattern: "9000*" }], "trimmed; empty rows dropped");
+  assert.equal(out.match_mode, "all");
+  assert.throws(() => A.normaliseDoc({ match: [{ field: "dmi..serial", pattern: "x" }] }), /not a field path/);
+  assert.throws(() => A.normaliseDoc({ match: [{ field: "dmi.system.serial", pattern: "" }] }), /needs a pattern/);
+  assert.ok(!A.emitToml(out).includes("9000"), "rules never reach the answer file");
+});
+
 /* ------------------------------- relay ------------------------------- */
 
 test("relay templates resolve nested paths and escape strings", () => {
