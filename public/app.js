@@ -550,6 +550,39 @@ function commentField(scope, key, { alwaysShow = false, placeholder } = {}) {
 
 /* ------------------------------- filters ----------------------------- */
 
+/** Structured rules: one field of the system information against a glob. */
+function renderMatchRules() {
+  const doc = S.answer.doc;
+  const rules = (doc.match = doc.match || []);
+  const card = el("div", { class: "card", style: "grid-column: 1 / -1" }, [
+    el("h3", { text: "Match rules" }),
+    el("p", { class: "muted", style: "margin-top:0", text:
+      "Each rule tests one field of what the installer reports. Globs work like Proxmox filters (* ? [abc] [!a]) and ignore case. " +
+      "Use [] for lists: network_interfaces[].mac matches if any NIC does." }),
+  ]);
+  const mode = el("select", { "aria-label": "match mode" }, [
+    el("option", { value: "all", text: "all rules must match", ...(doc.match_mode !== "any" ? { selected: true } : {}) }),
+    el("option", { value: "any", text: "any rule may match", ...(doc.match_mode === "any" ? { selected: true } : {}) }),
+  ]);
+  mode.addEventListener("change", () => { doc.match_mode = mode.value; markDirty(); });
+  card.append(el("label", { class: "field" }, [el("span", { text: "When several rules are set" }), mode]));
+
+  const fields = el("datalist", { id: "match-fields" });
+  for (const f of S.boot.schema.match_fields || []) fields.append(el("option", { value: f }));
+  card.append(fields);
+  for (const [i, rule] of rules.entries()) {
+    card.append(el("div", { class: "matchrow" }, [
+      el("input", { list: "match-fields", value: rule.field, placeholder: "network_interfaces[].mac", "aria-label": "field",
+        oninput: (e) => { rule.field = e.target.value; markDirty(); } }),
+      el("input", { value: rule.pattern, placeholder: "24:8a:07:1e:05:bc", "aria-label": "pattern", class: "mono",
+        oninput: (e) => { rule.pattern = e.target.value; markDirty(); } }),
+      el("button", { text: "−", title: "remove rule", onclick: () => { rules.splice(i, 1); markDirty(); renderAnswer(); } }),
+    ]));
+  }
+  card.append(el("button", { text: "Add rule", onclick: () => { rules.push({ field: "", pattern: "" }); markDirty(); renderAnswer(); } }));
+  return card;
+}
+
 function renderFilters() {
   const wrap = el("div", { class: "split" });
   const mk = (field, title, note) => {
@@ -577,8 +610,9 @@ function renderFilters() {
     }
     return card;
   };
-  wrap.append(mk("must_contain", "Must contain", "The system information must contain at least one of these strings for this answer to be used."));
-  wrap.append(mk("must_not_contain", "Must not contain", "If any of these strings is present, this answer is skipped."));
+  wrap.append(renderMatchRules());
+  wrap.append(mk("must_contain", "Text filter: must contain", "Legacy text search over the raw system information: at least one of these strings must appear. Prefer match rules above: a substring can match more than you meant."));
+  wrap.append(mk("must_not_contain", "Text filter: must not contain", "If any of these strings appears anywhere in the system information, this answer is skipped."));
   const tester = el("div", { class: "card" }, [
     el("h3", { text: "Dry run" }),
     el("p", { class: "muted", text: "Paste a system_info payload (copy one from History) to see which answer would win." }),
@@ -592,7 +626,10 @@ function renderFilters() {
       try { parsed = JSON.parse(ta.value || "{}"); } catch { return toast("That is not valid JSON.", "bad"); }
       const r = await api("/match", { method: "POST", body: { system_info: parsed } });
       const issues = r.problems?.length ? `\ninstaller would reject it:\n${r.problems.map((p) => "  - " + p).join("\n")}\n` : "";
-      out.textContent = `matched: ${r.matched}\nwould serve: ${r.would_serve}${r.reason ? " — " + r.reason : ""}\n${issues}\n${r.toml || ""}`;
+      const rules = r.rules?.length
+        ? `\nmatch rules (${r.match_mode}):\n${r.rules.map((x) => `  ${x.hit ? "✓" : "✗"} ${x.field} ~ ${x.pattern}   [${x.values.join(", ") || "no value"}]`).join("\n")}\n`
+        : "";
+      out.textContent = `matched: ${r.matched}\nwould serve: ${r.would_serve}${r.reason ? " — " + r.reason : ""}\n${rules}${issues}\n${r.toml || ""}`;
     },
   })]), out);
   const col = el("div", { style: "grid-column: 1 / -1" }, [tester]);
@@ -718,7 +755,8 @@ function applyParsedDoc(parsed) {
   const old = S.answer.doc;
   const comments = { ...(parsed.comments || {}) };
   for (const scope of ["must_contain", "must_not_contain"]) if (old.comments?.[scope]) comments[scope] = old.comments[scope];
-  S.answer.doc = { ...parsed, must_contain: old.must_contain || [], must_not_contain: old.must_not_contain || [], comments };
+  S.answer.doc = { ...parsed, must_contain: old.must_contain || [], must_not_contain: old.must_not_contain || [],
+    match: old.match || [], match_mode: old.match_mode || "all", comments };
   markDirty();
   const notes = [];
   if (docHoldsSecrets(S.answer.doc)) {

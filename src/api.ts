@@ -9,9 +9,8 @@ import { bool, num } from "./env";
 import { requireIdentity, type Identity } from "./access";
 import { audit, trimHistory } from "./db";
 import {
-  DEFAULT_NAME, MASK_MARKER, ValidationError, deleteAnswer, decryptDoc, docHasSecrets, ensureDefaultAnswer,
-  getAnswer, lintMerged, listAnswers, maskDoc, mergeDocs, normaliseDoc, saveAnswer, secretKeysIn, selectAnswer, validateName,
-  type AnswerRecord, type ServeMode,
+  decryptDoc, DEFAULT_NAME, deleteAnswer, docHasSecrets, ensureDefaultAnswer, evaluateRules, getAnswer, lintMerged, listAnswers, MASK_MARKER, maskDoc, MATCH_FIELD_SUGGESTIONS, mergeDocs, normaliseDoc, saveAnswer, secretKeysIn, selectAnswer, validateName, ValidationError,
+  type AnswerRecord, type ServeMode, type MatchRule,
 } from "./answers";
 import { parseAnswerToml } from "./tomlimport";
 import { armAnswer, canServe, crossSiteWriteRefusal, defaultArmMinutes, disarmAnswer } from "./guards";
@@ -107,7 +106,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
       answers: answers.map(publicAnswer),
       relays: relays.map((r) => ({ ...maskRelay(r), has_hmac: !!r.hmac_secret })),
       files,
-      schema: { sections: SECTIONS, order: SECTION_ORDER, formats: FORMATS },
+      schema: { sections: SECTIONS, order: SECTION_ORDER, formats: FORMATS, match_fields: MATCH_FIELD_SUGGESTIONS },
       config: {
         encryption_configured: !!env.ANSWER_ENC_KEY,
         serve_token_configured: !!env.SERVE_TOKEN,
@@ -289,10 +288,15 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     const selection = await selectAnswer(env, raw);
     if (!selection) return json({ matched: null, reason: "no answers are configured" });
     const decision = canServe(env, selection.record, { request, ip: "203.0.113.1", pathToken: env.SERVE_TOKEN ?? null });
+    let info: unknown = {};
+    try { info = JSON.parse(raw); } catch { /* raw came from JSON.stringify */ }
+    const rules: MatchRule[] = Array.isArray(selection.record.doc.match) ? selection.record.doc.match : [];
     return json({
       matched: selection.record.name,
       would_serve: decision.allowed,
       reason: decision.reason,
+      match_mode: selection.record.doc.match_mode === "any" ? "any" : "all",
+      rules: evaluateRules(info, rules),
       toml: emitToml(selection.merged, { redact: true, redactionText: REDACTION }),
       problems: lintMerged(selection.merged),
     });

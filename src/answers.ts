@@ -217,6 +217,17 @@ export function normaliseDoc(input: AnswerDoc): AnswerDoc {
   if (invalid.length) throw new ValidationError(`Not saved: ${invalid.join("; ")}.`);
   // Filters are answer metadata, not part of the TOML.
   out.must_contain = Array.isArray(input.must_contain) ? input.must_contain.filter((s: unknown) => typeof s === "string" && s.trim() !== "") : [];
+  const rules: MatchRule[] = [];
+  for (const r of Array.isArray(input.match) ? input.match : []) {
+    const field = typeof r?.field === "string" ? r.field.trim() : "";
+    const pattern = typeof r?.pattern === "string" ? r.pattern.trim() : "";
+    if (!field && !pattern) continue;
+    if (!MATCH_FIELD_RE.test(field)) throw new ValidationError(`Match rule field "${field}" is not a field path like dmi.system.serial or network_interfaces[].mac.`);
+    if (!pattern || pattern.length > 200) throw new ValidationError(`Match rule on ${field} needs a pattern (up to 200 characters).`);
+    rules.push({ field, pattern });
+  }
+  out.match = rules;
+  out.match_mode = input.match_mode === "any" ? "any" : "all";
   out.must_not_contain = Array.isArray(input.must_not_contain)
     ? input.must_not_contain.filter((s: unknown) => typeof s === "string" && s.trim() !== "")
     : [];
@@ -408,18 +419,103 @@ export async function ensureDefaultAnswer(env: Env): Promise<void> {
  * Matching and inheritance
  * ------------------------------------------------------------------ */
 
-/** Port of the upstream filter test: any must_contain hit, no must_not_contain hit. */
-export function matches(doc: AnswerDoc, systemInfoRaw: string): boolean {
-  let match = false;
+/* ------------------------- structured match rules ------------------------ */
+
+/**
+ * A rule tests one field of the installer's system information against a
+ * glob: `dmi.system.serial` ~ `9000*`, `network_interfaces[].mac` ~
+ * `24:8a:07:*`. `[]` after a segment means "any element of this list".
+ * Globs follow the installer's own filter syntax (* ? [abc] [!a]) and ignore
+ * case, so MAC addresses match however they are written.
+ */
+export interface MatchRule {
+  field: string;
+  pattern: string;
+}
+
+export type MatchMode = "all" | "any";
+
+export const MATCH_FIELD_RE = /^[A-Za-z0-9_$-]+(?:\[\])?(?:\.[A-Za-z0-9_$-]+(?:\[\])?)*$/;
+
+/** Fields worth offering in the editor; any other path works too. */
+export const MATCH_FIELD_SUGGESTIONS = [
+  "network_interfaces[].mac", "network_interfaces[].link",
+  "dmi.system.serial", "dmi.system.uuid", "dmi.system.name", "dmi.system.sku",
+  "dmi.baseboard.serial", "dmi.baseboard.name", "dmi.chassis.serial", "dmi.chassis.asset_tag",
+  "product.product", "product.fullname", "iso.release",
+];
+
+export function globToRegExp(pattern: string): RegExp {
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "*") re += ".*";
+    else if (c === "?") re += ".";
+    else if (c === "[") {
+      const close = pattern.indexOf("]", i + 2);
+      if (close === -1) { re += "\\["; continue; }
+      let body = pattern.slice(i + 1, close);
+      const negate = body.startsWith("!");
+      if (negate) body = body.slice(1);
+      re += `[${negate ? "^" : ""}${body.replace(/[\\\]^]/g, "\\$&")}]`;
+      i = close;
+    } else re += c.replace(/[.+^${}()|\\\]\/]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`, "i");
+}
+
+/** Every value at `field` in `info` (several when the path crosses a list). */
+export function fieldValues(info: unknown, field: string): string[] {
+  let current: unknown[] = [info];
+  for (const raw of field.split(".")) {
+    const each = raw.endsWith("[]");
+    const key = each ? raw.slice(0, -2) : raw;
+    const next: unknown[] = [];
+    for (const node of current) {
+      if (!node || typeof node !== "object" || Array.isArray(node)) continue;
+      const v = (node as Record<string, unknown>)[key];
+      if (v === undefined || v === null) continue;
+      if (each) { if (Array.isArray(v)) next.push(...v); }
+      else next.push(v);
+    }
+    current = next;
+  }
+  return current.filter((v) => typeof v === "string" || typeof v === "number" || typeof v === "boolean").map(String);
+}
+
+export interface RuleResult extends MatchRule {
+  values: string[];
+  hit: boolean;
+}
+
+export function evaluateRules(info: unknown, rules: MatchRule[]): RuleResult[] {
+  return rules.map((r) => {
+    const values = fieldValues(info, r.field);
+    const re = globToRegExp(r.pattern);
+    return { ...r, values: values.slice(0, 8), hit: values.some((v) => re.test(v)) };
+  });
+}
+
+/**
+ * Does this answer claim this machine? Text filters keep their upstream
+ * meaning (some must_contain hits, no must_not_contain hits). Match rules,
+ * when present, must also hold (all, or any, per match_mode). An answer with
+ * only match rules needs no must_contain; must_not_contain still vetoes.
+ */
+export function matches(doc: AnswerDoc, systemInfoRaw: string, info?: unknown): boolean {
   const mustContain: string[] = Array.isArray(doc.must_contain) ? doc.must_contain : [];
   const mustNotContain: string[] = Array.isArray(doc.must_not_contain) ? doc.must_not_contain : [];
-  for (const entry of mustContain) {
-    if (entry.length > 0 && systemInfoRaw.includes(entry)) match = true;
+  const rules: MatchRule[] = Array.isArray(doc.match) ? doc.match : [];
+  if (mustNotContain.some((e) => e.length > 0 && systemInfoRaw.includes(e))) return false;
+  const textOk = mustContain.some((e) => e.length > 0 && systemInfoRaw.includes(e));
+  if (rules.length === 0) return textOk;
+  if (mustContain.length > 0 && !textOk) return false;
+  let parsed = info;
+  if (parsed === undefined) {
+    try { parsed = JSON.parse(systemInfoRaw); } catch { parsed = {}; }
   }
-  for (const entry of mustNotContain) {
-    if (entry.length > 0 && systemInfoRaw.includes(entry)) match = false;
-  }
-  return match;
+  const results = evaluateRules(parsed, rules);
+  return doc.match_mode === "any" ? results.some((r) => r.hit) : results.every((r) => r.hit);
 }
 
 /**
@@ -544,9 +640,11 @@ export async function selectAnswer(env: Env, systemInfoRaw: string): Promise<Sel
   const all = await listAnswers(env);
   const def = all.find((a) => a.name === DEFAULT_NAME) ?? null;
   const defaultDoc = def?.doc ?? {};
+  let info: unknown;
+  try { info = JSON.parse(systemInfoRaw); } catch { info = {}; }
   for (const record of all) {
     if (record.name === DEFAULT_NAME) continue;
-    if (!matches(record.doc, systemInfoRaw)) continue;
+    if (!matches(record.doc, systemInfoRaw, info)) continue;
     return { record, merged: mergeDocs(defaultDoc, record.doc), defaultRecord: def };
   }
   if (!def) return null;
