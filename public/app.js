@@ -99,7 +99,7 @@ function renderBanners() {
   }
   if (!c.serve_token_configured) {
     box.append(el("div", { class: "banner info", text:
-      "No SERVE_TOKEN is set, so /answer is reachable by anyone who knows the hostname. Answers holding credentials still require arming, but a token narrows the exposure further." }));
+      "No SERVE_TOKEN is set, so /answer is reachable by anyone who knows the hostname and webhook relays are disabled (/hook refuses every call). Answers holding credentials still require arming, but a token narrows the exposure further." }));
   }
 }
 
@@ -796,6 +796,8 @@ function renderRelay() {
       el("h3", { text: "Installer configuration" }),
       el("p", { class: "muted", text: "Set this as the post-installation-webhook URL in your answer:" }),
       el("div", { class: "url", text: `${S.boot.config.origin}/hook/${r.name}` + (S.boot.config.serve_token_configured ? "/<SERVE_TOKEN>" : "") }),
+      S.boot.config.serve_token_configured ? "" : el("div", { class: "banner warn", text:
+        "No SERVE_TOKEN is set, so this relay will refuse every installer call. Set one: openssl rand -hex 24 | wrangler secret put SERVE_TOKEN" }),
     ]),
     el("div", { class: "card", id: "relay-log" }, [el("h3", { text: "Delivery log" }), el("button", { text: "Refresh", onclick: loadRelayLog })]),
   );

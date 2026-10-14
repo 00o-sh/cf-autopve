@@ -68,9 +68,13 @@ If you do host:
    acknowledgement (typing `HOST SECRETS`) on the Serving tab. That flag is per answer and recorded.
 3. **Armed windows.** Credential-bearing answers default to `serve_mode = "armed"`: they are refused
    until you arm them for N minutes and/or N serves. One install, one arm. `"always"` is rejected for
-   such answers unless `ALLOW_ALWAYS_SECRETS=true`.
+   such answers unless `ALLOW_ALWAYS_SECRETS=true`. The serve count is spent atomically in D1 *before*
+   anything is decrypted, so a burst of concurrent fetches against an answer armed for one serve gets
+   exactly one answer; the rest are refused and recorded.
 4. **Source restrictions.** Per-answer IP/CIDR allowlist, an optional deployment-wide `SERVE_TOKEN`
-   (`POST /answer/<token>` or the `X-AutoPVE-Token` header), and a per-IP rate limit.
+   (`POST /answer/<token>` or the `X-AutoPVE-Token` header), and a per-IP rate limit. The allowlist is
+   the only per-answer access control: **filters are for routing, not security** (see
+   [Answers](#answers)).
 5. **HTTPS required.** Credentials are never served over plain HTTP (`REQUIRE_HTTPS`, default on).
 6. **Nothing leaks into history.** Request history stores the response with credentials replaced by
    `REDACTED-BY-AUTOPVE`; the UI preview is redacted too. Revealing or downloading the real values is a
@@ -94,7 +98,7 @@ npx wrangler d1 migrations apply autopve --remote
 # 2. encryption key (required before any credential can be stored)
 openssl rand -base64 32 | npx wrangler secret put ANSWER_ENC_KEY
 
-# 3. optional: a token the installer must present
+# 3. a token the installer must present (optional for /answer and /files, required for relays)
 openssl rand -hex 24 | npx wrangler secret put SERVE_TOKEN
 
 # 4. deploy
@@ -145,6 +149,13 @@ the installer POSTs, and no *must not contain* string does. First match by `prio
 no match falls back to `Default`. The Filters tab has a dry-run box — paste a `system_info` payload from
 History and see which answer would win and whether it would actually be served.
 
+> **Filters are for routing, not security.** They match against the JSON the client POSTs, and the
+> client writes that JSON. Anyone who can reach `/answer` can claim any MAC address, serial number or
+> product name and so pick which answer they are offered. What actually stops an answer being handed
+> out is its serve mode, arm window and serve budget, its IP/CIDR allowlist, and the `SERVE_TOKEN`.
+> If two nodes must not be able to get each other's credentials, give each answer an allowlist and arm
+> it only while that node is installing.
+
 Point the installer at it by building an ISO with `scripts/build-iso.sh`. It downloads the PVE release
 (newest by default) from Proxmox, checks it against their `SHA256SUMS`, and runs
 `proxmox-auto-install-assistant prepare-iso` with your answer URL. When the assistant and `xorriso`
@@ -167,11 +178,17 @@ proxmox-auto-install-assistant prepare-iso pve.iso \
 
 ### Post-installation webhook relay
 
-Create a relay, then set it in the answer's **Post Install** section:
+Relays need a `SERVE_TOKEN`. A relay fires real automation, and `/hook` has no arm window or allowlist,
+so without a token anyone who guessed a relay name could trigger it with a payload of their choosing,
+signed with your HMAC secret. While no token is configured, every `/hook` call is refused with
+`403 relays are disabled until a SERVE_TOKEN is configured`.
+
+Create a relay, then set it in the answer's **Post Install** section, with the token as the last path
+segment:
 
 ```toml
 [post-installation-webhook]
-url = "https://autopve.example.com/hook/deploy"
+url = "https://autopve.example.com/hook/deploy/<SERVE_TOKEN>"
 ```
 
 When the installer finishes, it POSTs its system information here; the Worker records it and forwards it
@@ -230,7 +247,7 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 | `HISTORY_LIMIT` | `1000` | history rows retained |
 | `DEV_ALLOW_INSECURE_UI` | unset | local only; bypasses Access |
 | `ANSWER_ENC_KEY` | secret | base64 32-byte AES-256-GCM key; required to store any credential |
-| `SERVE_TOKEN` | secret | optional token the installer must present |
+| `SERVE_TOKEN` | secret | token the installer must present; optional for `/answer` and `/files`, required for `/hook` (relays are refused without it) |
 
 ## Endpoints
 
@@ -239,7 +256,7 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 | `GET /` | Access | configurator UI |
 | `/api/*` | Access | configurator API |
 | `POST /answer[/<token>]` | guards | installer fetches its answer file |
-| `POST /hook/<relay>[/<token>]` | guards | post-installation webhook → relay |
+| `POST /hook/<relay>/<token>` | `SERVE_TOKEN` (required) | post-installation webhook → relay |
 | `GET /files/<name>[?t=<token>]` | guards | first-boot scripts and downloads |
 | `GET /healthz` | none | liveness |
 
@@ -251,7 +268,7 @@ src/
   api.ts       Access-gated JSON API for the UI
   access.ts    Cloudflare Access JWT verification (JWKS, iss/aud/exp)
   answers.ts   storage, inheritance, filter matching, masking
-  guards.ts    serve decisions: mode, arm window, CIDR, token, HTTPS
+  guards.ts    serve decisions: mode, arm window, CIDR, token, HTTPS; atomic serve claim
   crypto.ts    AES-256-GCM envelope encryption, HMAC, token compare
   relay.ts     outbound webhook relay, templating, delivery log
   toml.ts      answer.toml writer + value coercion

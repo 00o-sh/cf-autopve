@@ -4,7 +4,7 @@
  *   /                 configurator UI            (Cloudflare Access required)
  *   /api/*            configurator API           (Cloudflare Access required)
  *   POST /answer      installer answer endpoint  (unauthenticated by nature — see guards.ts)
- *   POST /hook/<name> post-installation webhook -> outbound relay
+ *   POST /hook/<name> post-installation webhook -> outbound relay (needs SERVE_TOKEN)
  *   GET  /files/<n>   first-boot scripts and other hosted files
  *   GET  /healthz     liveness
  */
@@ -15,7 +15,7 @@ import { AccessError, requireIdentity } from "./access";
 import { handleApi } from "./api";
 import { addHistory, rateLimited, recordSysinfoKeys, trimHistory } from "./db";
 import { decryptDoc, docHasSecrets, selectAnswer, systemName } from "./answers";
-import { canServe, consumeServe, tokenOk } from "./guards";
+import { canServe, claimServe, hookAllowed, tokenOk } from "./guards";
 import { serveFile } from "./files";
 import { deliver, getRelay } from "./relay";
 import { emitToml } from "./toml";
@@ -101,19 +101,26 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
     return new Response("no answers are configured on this deployment\n", { status: 404, headers: TEXT });
   }
   const record = selection.record;
-  const decision = canServe(env, record, { request, ip, pathToken });
-
-  if (!decision.allowed) {
+  const refuse = (reason: string): Response => {
     ctx.waitUntil(
       (async () => {
         await addHistory(env, {
           ts: Date.now(), kind: "answer", answer: record.name, system_name: systemName(systemInfo),
-          ip, outcome: "denied", detail: decision.reason, response: "", system_info: systemInfoRaw,
+          ip, outcome: "denied", detail: reason, response: "", system_info: systemInfoRaw,
         });
         await recordSysinfoKeys(env, systemInfoRaw);
       })(),
     );
-    return new Response(`refused: ${decision.reason}\n`, { status: 403, headers: TEXT });
+    return new Response(`refused: ${reason}\n`, { status: 403, headers: TEXT });
+  };
+
+  const decision = canServe(env, record, { request, ip, pathToken });
+  if (!decision.allowed) return refuse(decision.reason);
+
+  // Spend the serve before decrypting anything; a lost claim means a
+  // concurrent request took the last serve or the answer was disarmed.
+  if (!(await claimServe(env, record))) {
+    return refuse(`answer "${record.name}" was disarmed or used up its serves while this request was in flight`);
   }
 
   const plain = await decryptDoc(selection.merged, env);
@@ -129,7 +136,6 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
         response: redacted, system_info: systemInfoRaw,
       });
       await recordSysinfoKeys(env, systemInfoRaw);
-      await consumeServe(env, record);
       if (id % 25 === 0) await trimHistory(env);
     })(),
   );
@@ -150,7 +156,8 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
   const pathToken = segments[1] ?? null;
   const ip = clientIp(request);
 
-  if (!tokenOk(env, request, pathToken)) return new Response("refused: serve token missing or incorrect\n", { status: 403, headers: TEXT });
+  const decision = hookAllowed(env, request, pathToken);
+  if (!decision.allowed) return new Response(`refused: ${decision.reason}\n`, { status: 403, headers: TEXT });
   if (await rateLimited(env, ip, "hook")) return new Response("rate limit exceeded\n", { status: 429, headers: TEXT });
 
   const relay = await getRelay(env, name);

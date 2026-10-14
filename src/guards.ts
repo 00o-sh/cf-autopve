@@ -9,6 +9,7 @@
  *   - serve_mode: off / armed (time- and count-boxed) / always
  *   - per-answer IP or CIDR allowlist
  *   - optional deployment-wide SERVE_TOKEN in the path or a header
+ *     (required for /hook: relays are refused while it is unset)
  *   - HTTPS required before any credential leaves the Worker
  *   - per-IP rate limit
  *
@@ -146,14 +147,40 @@ export function canServe(env: Env, record: AnswerRecord, ctx: ServeContext): Dec
   return ALLOW;
 }
 
-/** Count a successful serve and disarm once the budget is gone. */
-export async function consumeServe(env: Env, record: AnswerRecord): Promise<void> {
-  if (record.serve_mode !== "armed") return;
-  if (record.serves_remaining === null) return;
-  const left = Math.max(0, record.serves_remaining - 1);
-  await env.DB.prepare("UPDATE answers SET serves_remaining = ?, armed_until = ? WHERE name = ?")
-    .bind(left, left === 0 ? null : record.armed_until, record.name)
-    .run();
+/**
+ * Claim one serve of an armed answer, atomically, before anything is
+ * decrypted. canServe() works from a snapshot read at the start of the
+ * request, so on its own it lets N concurrent requests all see "1 serve left"
+ * and all be served. The conditional UPDATE re-checks the arm window and the
+ * budget in the same statement that spends it: exactly as many requests win as
+ * there were serves, and the last one disarms the answer. SET expressions see
+ * the pre-update row, hence `serves_remaining = 1` for "this was the last one".
+ */
+export async function claimServe(env: Env, record: AnswerRecord, now = Date.now()): Promise<boolean> {
+  if (record.serve_mode !== "armed") return true;
+  const row = await env.DB.prepare(
+    `UPDATE answers
+        SET serves_remaining = CASE WHEN serves_remaining IS NULL THEN NULL ELSE serves_remaining - 1 END,
+            armed_until      = CASE WHEN serves_remaining = 1 THEN NULL ELSE armed_until END
+      WHERE name = ? AND serve_mode = 'armed' AND armed_until > ?
+        AND (serves_remaining IS NULL OR serves_remaining > 0)
+      RETURNING name`,
+  )
+    .bind(record.name, now)
+    .first();
+  return row !== null;
+}
+
+/**
+ * Relays trigger real automation, and /hook has no arm window or allowlist,
+ * so without a SERVE_TOKEN anyone who can guess a relay name could fire it
+ * with a payload of their choosing — signed with your HMAC secret. Relays are
+ * therefore refused outright until a token is configured.
+ */
+export function hookAllowed(env: Env, request: Request, pathToken: string | null): Decision {
+  if (!env.SERVE_TOKEN) return deny("relays are disabled until a SERVE_TOKEN is configured on this deployment");
+  if (!tokenOk(env, request, pathToken)) return deny("serve token missing or incorrect");
+  return ALLOW;
 }
 
 export async function armAnswer(env: Env, name: string, minutes: number, serves: number | null): Promise<void> {

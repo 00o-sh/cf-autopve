@@ -197,6 +197,91 @@ test("the serve token is required when one is configured", () => {
   assert.equal(A.canServe(env, armed, { request: withHeader, ip: ctx.ip, pathToken: null }).allowed, true);
 });
 
+/* ------------------------- atomic serve claim ------------------------ */
+
+// A minimal D1 stand-in over node:sqlite, using the real migration, so the
+// claim's SQL is exercised as written.
+async function d1() {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readFileSync } = await import("node:fs");
+  const db = new DatabaseSync(":memory:");
+  db.exec(readFileSync(new URL("../migrations/0001_init.sql", import.meta.url), "utf8"));
+  return {
+    raw: db,
+    prepare: (sql) => ({
+      bind: (...args) => ({
+        first: async () => db.prepare(sql).get(...args) ?? null,
+        run: async () => db.prepare(sql).run(...args),
+      }),
+    }),
+  };
+}
+
+async function armedRow(DB, fields) {
+  const row = { serve_mode: "armed", armed_until: Date.now() + 60000, serves_remaining: 1, ...fields };
+  DB.raw.prepare("INSERT INTO answers (name, serve_mode, armed_until, serves_remaining, created_at, updated_at) VALUES ('node1', ?, ?, ?, 0, 0)")
+    .run(row.serve_mode, row.armed_until, row.serves_remaining);
+  return { ...baseAnswer, ...row };
+}
+
+const rowOf = (DB) => DB.raw.prepare("SELECT serve_mode, armed_until, serves_remaining FROM answers WHERE name = 'node1'").get();
+
+test("concurrent fetches against a one-serve arm get exactly one answer", async () => {
+  const DB = await d1();
+  const record = await armedRow(DB, { serves_remaining: 1 });
+  // Every request read the same snapshot and passed canServe…
+  assert.equal(A.canServe({}, record, ctx).allowed, true);
+  // …but only one may spend the serve.
+  const wins = (await Promise.all(Array.from({ length: 10 }, () => A.claimServe({ DB }, record)))).filter(Boolean);
+  assert.equal(wins.length, 1);
+  assert.deepEqual({ ...rowOf(DB) }, { serve_mode: "armed", armed_until: null, serves_remaining: 0 }, "last serve disarms");
+});
+
+test("a serve budget of N admits exactly N", async () => {
+  const DB = await d1();
+  const record = await armedRow(DB, { serves_remaining: 3 });
+  const wins = (await Promise.all(Array.from({ length: 8 }, () => A.claimServe({ DB }, record)))).filter(Boolean);
+  assert.equal(wins.length, 3);
+  assert.equal(rowOf(DB).serves_remaining, 0);
+});
+
+test("an unlimited arm keeps serving inside its window and stops after it", async () => {
+  const DB = await d1();
+  const until = Date.now() + 60000;
+  const record = await armedRow(DB, { serves_remaining: null, armed_until: until });
+  assert.equal(await A.claimServe({ DB }, record), true);
+  assert.equal(await A.claimServe({ DB }, record), true);
+  assert.deepEqual({ ...rowOf(DB) }, { serve_mode: "armed", armed_until: until, serves_remaining: null });
+  assert.equal(await A.claimServe({ DB }, record, until + 1), false);
+});
+
+test("a claim loses to a disarm or mode change made after the snapshot", async () => {
+  const DB = await d1();
+  const record = await armedRow(DB, { serves_remaining: 5 });
+  DB.raw.exec("UPDATE answers SET armed_until = NULL, serves_remaining = NULL");
+  assert.equal(await A.claimServe({ DB }, record), false);
+  DB.raw.exec(`UPDATE answers SET armed_until = ${Date.now() + 60000}, serve_mode = 'off'`);
+  assert.equal(await A.claimServe({ DB }, record), false);
+});
+
+test("always-mode answers need no claim", async () => {
+  assert.equal(await A.claimServe({ DB: null }, { ...baseAnswer, serve_mode: "always" }), true);
+});
+
+/* ------------------------------ hook guard ---------------------------- */
+
+test("relays are refused outright without a SERVE_TOKEN", () => {
+  const hook = new Request("https://pve.example.com/hook/deploy", { method: "POST" });
+  assert.match(A.hookAllowed({}, hook, null).reason, /disabled until a SERVE_TOKEN/);
+  assert.equal(A.hookAllowed({}, hook, "anything").allowed, false);
+  const env = { SERVE_TOKEN: "s3cr3t" };
+  assert.match(A.hookAllowed(env, hook, null).reason, /missing or incorrect/);
+  assert.equal(A.hookAllowed(env, hook, "wrong").allowed, false);
+  assert.equal(A.hookAllowed(env, hook, "s3cr3t").allowed, true);
+  const withHeader = new Request("https://pve.example.com/hook/deploy", { method: "POST", headers: { "X-AutoPVE-Token": "s3cr3t" } });
+  assert.equal(A.hookAllowed(env, withHeader, null).allowed, true);
+});
+
 /* ------------------------------- relay ------------------------------- */
 
 test("relay templates resolve nested paths and escape strings", () => {
