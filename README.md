@@ -130,6 +130,8 @@ the deploy command (Settings → Build → Deploy command) to `npm run deploy`, 
 token **D1: Edit** in addition to Workers Scripts: Edit. Migrations run *before* the new code goes live,
 so the old code runs against the new schema for a moment: keep migrations additive (new tables and
 nullable columns), never rename or drop in the same release that stops using something.
+To see what a deploy would apply: `npx wrangler d1 migrations list autopve --remote` (add `--preview`
+for the preview database).
 
 Then put **Cloudflare Access** in front of the configurator:
 
