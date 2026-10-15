@@ -132,6 +132,8 @@ so the old code runs against the new schema for a moment: keep migrations additi
 nullable columns), never rename or drop in the same release that stops using something.
 To see what a deploy would apply: `npx wrangler d1 migrations list autopve --remote` (add `--preview`
 for the preview database).
+If a build of `main` logs `wrangler preview` rather than `wrangler deploy`, the two deploy commands are
+swapped: production stays on its previous version even though the build reports success.
 
 Then put **Cloudflare Access** in front of the configurator:
 
