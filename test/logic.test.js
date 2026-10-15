@@ -613,3 +613,16 @@ test("an answer's own key never inherits Default's comment", () => {
   const own = A.mergeDocs(merged, { global: { fqdn: "node2.example.com" }, comments: { global: { fqdn: "node 2" } } });
   assert.equal(own.comments.global.fqdn, "node 2");
 });
+
+/* ------------------------------ wrangler.toml ------------------------- */
+
+test("every [vars] key is repeated in [previews.vars], and previews never touch production D1", async () => {
+  const { readFileSync } = await import("node:fs");
+  const cfg = A.parseTomlRaw(readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8"));
+  // `wrangler preview` (Workers Builds, every PR) refuses to run when a var is missing here.
+  const missing = Object.keys(cfg.vars).filter((k) => !(k in (cfg.previews?.vars ?? {})));
+  assert.deepEqual(missing, [], "add these to [previews.vars] in wrangler.toml");
+  assert.ok(!("DEV_ALLOW_INSECURE_UI" in cfg.previews.vars), "previews must keep Access enforced");
+  const prod = cfg.d1_databases.map((d) => d.database_id);
+  for (const d of cfg.previews.d1_databases) assert.ok(!prod.includes(d.database_id), `preview binding ${d.binding} points at a production database`);
+});
