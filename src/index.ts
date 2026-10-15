@@ -17,7 +17,7 @@ import { addHistory, rateLimited, recordSysinfoKeys, trimHistory } from "./db";
 import { decryptDoc, docHasSecrets, lintMerged, selectAnswer, systemName } from "./answers";
 import { bodyTokenOk, canServe, claimServe, hookAllowed, tokenOk } from "./guards";
 import { serveFile } from "./files";
-import { deliver, getRelay } from "./relay";
+import { MAX_QUEUED_JOB_BYTES, deliver, getRelay, handleRelayBatch, type RelayJob } from "./relay";
 import { emitJson, emitToml, prefersJson } from "./toml";
 
 const TEXT = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" };
@@ -38,6 +38,10 @@ export default {
       console.error("unhandled:", err);
       return new Response("internal error\n", { status: 500, headers: TEXT });
     }
+  },
+
+  async queue(batch: MessageBatch<RelayJob>, env: Env): Promise<void> {
+    await handleRelayBatch(batch, env);
   },
 };
 
@@ -196,19 +200,33 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
   // A token is a credential either way: never into history or the key index.
   const infoRaw = JSON.stringify(payload && typeof payload === "object" && "token" in payload ? { ...payload, token: undefined } : payload);
 
+  const job: RelayJob = { relay: relay.name, history_id: null, payload, raw_body: rawBody };
+  const queueable = !!env.RELAY_QUEUE && JSON.stringify(job).length <= MAX_QUEUED_JOB_BYTES;
   const id = await addHistory(env, {
     ts: Date.now(), kind: "hook", answer: null, system_name: systemName(payload), ip,
-    outcome: "relayed", detail: `-> ${relay.name}`, response: "", system_info: infoRaw,
+    outcome: queueable ? "queued" : "relaying", detail: `-> ${relay.name}`, response: "", system_info: infoRaw,
   });
-  ctx.waitUntil(
-    (async () => {
-      await recordSysinfoKeys(env, infoRaw);
-      const result = await deliver(env, relay, payload, rawBody, id);
-      await env.DB.prepare("UPDATE history SET outcome = ?, detail = ? WHERE id = ?")
-        .bind(result.ok ? "relayed" : "error", result.ok ? `-> ${relay.name} (HTTP ${result.status})` : `-> ${relay.name} failed: ${result.error}`, id)
-        .run();
-    })(),
-  );
+  job.history_id = id;
+  ctx.waitUntil(recordSysinfoKeys(env, infoRaw));
+
+  if (queueable) {
+    // Enqueued before the 202, so an accepted payload survives this invocation.
+    await env.RELAY_QUEUE!.send(job);
+  } else {
+    ctx.waitUntil(
+      (async () => {
+        const result = await deliver(env, relay, payload, rawBody, id);
+        const note = env.RELAY_QUEUE ? " (payload too large for the queue, delivered inline)" : "";
+        await env.DB.prepare("UPDATE history SET outcome = ?, detail = ? WHERE id = ?")
+          .bind(
+            result.ok ? "relayed" : "error",
+            result.ok ? `-> ${relay.name} (HTTP ${result.status})${note}` : `-> ${relay.name} failed: ${result.error}${note}`,
+            id,
+          )
+          .run();
+      })(),
+    );
+  }
 
   // The installer only needs to know we took the payload; delivery is async.
   return new Response("accepted\n", { status: 202, headers: TEXT });

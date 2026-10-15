@@ -16,6 +16,19 @@ binding = "DB"
 database_name = "autopve"
 database_id = "483d7b40-0907-41c2-a84c-fd567e84f0aa"
 
+# Optional: durable relay delivery. Without it, /hook delivers inside the request's
+# ~30s background window (retries that do not fit are logged as stopped). With it,
+# each attempt is its own queue invocation and failures back off 10s, 20s, 40s ...
+# up to the relay's retry count. Create it with `npx wrangler queues create autopve-relay`.
+# [[queues.producers]]
+# binding = "RELAY_QUEUE"
+# queue = "autopve-relay"
+#
+# [[queues.consumers]]
+# queue = "autopve-relay"
+# max_batch_size = 5
+# max_retries = 10        # must be >= the largest relay retry count (5)
+
 # Optional: first-boot files larger than FILE_MAX_BYTES need R2.
 # Uncomment after `npx wrangler r2 bucket create autopve-files`.
 # [[r2_buckets]]

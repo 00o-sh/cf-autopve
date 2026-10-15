@@ -185,11 +185,23 @@ export interface DeliveryResult {
   attempts: number;
 }
 
-/**
- * Deliver one payload to one relay target, with retries. Called from
- * ctx.waitUntil so the installer is not kept waiting on the target.
- */
-export async function deliver(env: Env, relay: RelayRecord, payload: any, rawBody: string, historyId: number | null): Promise<DeliveryResult> {
+/** Everything a delivery needs, small enough to travel as a Queue message. */
+export interface RelayJob {
+  relay: string;
+  history_id: number | null;
+  payload: unknown;
+  raw_body: string;
+}
+
+/** Queue messages are capped at 128 KB; leave room for the envelope. */
+export const MAX_QUEUED_JOB_BYTES = 100 * 1024;
+
+/** Backoff before queued attempt n+1, after attempt n failed. */
+export function retryDelaySeconds(attempt: number): number {
+  return Math.min(300, 10 * 2 ** Math.max(0, attempt - 1));
+}
+
+async function buildRequest(env: Env, relay: RelayRecord, payload: unknown, rawBody: string): Promise<{ headers: Headers; body: string }> {
   const context = { system_info: payload, relay: relay.name, now: new Date().toISOString() };
   const body = relay.body_template.trim() ? renderTemplate(relay.body_template, context) : rawBody;
 
@@ -207,25 +219,59 @@ export async function deliver(env: Env, relay: RelayRecord, payload: any, rawBod
     headers.set("X-AutoPVE-Timestamp", ts);
     headers.set("X-AutoPVE-Signature", `sha256=${await hmacSha256Hex(secret, `${ts}.${body}`)}`);
   }
+  return { headers, body };
+}
 
+/** One attempt, logged. The signature is recomputed per attempt so its timestamp stays fresh. */
+export async function deliverOnce(
+  env: Env, relay: RelayRecord, payload: unknown, rawBody: string, historyId: number | null, attempt: number,
+): Promise<DeliveryResult> {
+  const { headers, body } = await buildRequest(env, relay, payload, rawBody);
+  let result: DeliveryResult;
+  try {
+    const res = await fetch(relay.url, { method: relay.method, headers, body, signal: AbortSignal.timeout(relay.timeout_ms) });
+    const text = (await res.text()).slice(0, 2048);
+    result = { ok: res.ok, status: res.status, error: res.ok ? "" : `HTTP ${res.status}`, response: text, attempts: attempt };
+  } catch (err) {
+    result = { ok: false, status: null, error: String((err as Error)?.message || err), response: "", attempts: attempt };
+  }
+  await logDelivery(env, relay.name, historyId, result);
+  return result;
+}
+
+/**
+ * Background work after a response gets about 30 seconds (ctx.waitUntil),
+ * after which it is cancelled without a trace. Inline delivery therefore
+ * only starts an attempt that can finish inside this budget, and says so
+ * when it runs out instead of vanishing. Bind RELAY_QUEUE for retries that
+ * survive past it.
+ */
+export const INLINE_BUDGET_MS = 25_000;
+
+/**
+ * Deliver with retries inside the current invocation: the "Send test"
+ * button, and /hook when no RELAY_QUEUE is bound.
+ */
+export async function deliver(
+  env: Env, relay: RelayRecord, payload: unknown, rawBody: string, historyId: number | null,
+  budgetMs = INLINE_BUDGET_MS,
+): Promise<DeliveryResult> {
+  const deadline = Date.now() + budgetMs;
   let last: DeliveryResult = { ok: false, status: null, error: "not attempted", response: "", attempts: 0 };
   for (let attempt = 1; attempt <= relay.retries + 1; attempt++) {
-    last.attempts = attempt;
-    try {
-      const res = await fetch(relay.url, {
-        method: relay.method,
-        headers,
-        body,
-        signal: AbortSignal.timeout(relay.timeout_ms),
-      });
-      const text = (await res.text()).slice(0, 2048);
-      last = { ok: res.ok, status: res.status, error: res.ok ? "" : `HTTP ${res.status}`, response: text, attempts: attempt };
-    } catch (err) {
-      last = { ok: false, status: null, error: String((err as Error)?.message || err), response: "", attempts: attempt };
+    const pause = attempt > 1 ? 500 * (attempt - 1) : 0;
+    if (Date.now() + pause + relay.timeout_ms > deadline) {
+      last = {
+        ...last,
+        error: `${last.error ? last.error + "; " : ""}stopped after ${attempt - 1} attempt(s): no time left for another ` +
+          `${relay.timeout_ms / 1000}s attempt. Bind RELAY_QUEUE for durable retries.`,
+      };
+      await logDelivery(env, relay.name, historyId, { ...last, attempts: attempt - 1 });
+      break;
     }
-    await logDelivery(env, relay.name, historyId, last);
+    if (pause) await new Promise((r) => setTimeout(r, pause));
+    last = await deliverOnce(env, relay, payload, rawBody, historyId, attempt);
     if (last.ok) break;
-    if (attempt <= relay.retries) await new Promise((r) => setTimeout(r, 500 * attempt));
   }
   return last;
 }
@@ -237,4 +283,53 @@ async function logDelivery(env: Env, relay: string, historyId: number | null, re
     .bind(Date.now(), relay, historyId, result.attempts, result.status, result.ok ? 1 : 0, result.error, result.response)
     .run();
   await env.DB.prepare("DELETE FROM relay_log WHERE id NOT IN (SELECT id FROM relay_log ORDER BY ts DESC LIMIT 500)").run();
+}
+
+/* ------------------------------------------------------------------ *
+ * Queue consumer
+ * ------------------------------------------------------------------ */
+
+async function setHistoryOutcome(env: Env, id: number | null, outcome: string, detail: string): Promise<void> {
+  if (id === null) return;
+  await env.DB.prepare("UPDATE history SET outcome = ?, detail = ? WHERE id = ?").bind(outcome, detail, id).run();
+}
+
+/**
+ * One attempt per message per invocation. A failure is retried by the queue
+ * after retryDelaySeconds(), up to the relay's own `retries`; the queue's
+ * max_retries only has to be at least the largest allowed value (5). The
+ * relay is looked up again on every attempt, so disabling or fixing it takes
+ * effect for deliveries already in flight.
+ */
+export async function handleRelayBatch(batch: MessageBatch<RelayJob>, env: Env): Promise<void> {
+  for (const msg of batch.messages) {
+    const job = msg.body;
+    try {
+      const relay = await getRelay(env, job.relay);
+      if (!relay || !relay.enabled) {
+        await setHistoryOutcome(env, job.history_id, "error", `-> ${job.relay} dropped: the relay was deleted or disabled`);
+        msg.ack();
+        continue;
+      }
+      const result = await deliverOnce(env, relay, job.payload, job.raw_body, job.history_id, msg.attempts);
+      if (result.ok) {
+        await setHistoryOutcome(env, job.history_id, "relayed", `-> ${relay.name} (HTTP ${result.status}, attempt ${msg.attempts})`);
+        msg.ack();
+      } else if (msg.attempts <= relay.retries) {
+        const delay = retryDelaySeconds(msg.attempts);
+        await setHistoryOutcome(
+          env, job.history_id, "retrying",
+          `-> ${relay.name}: ${result.error}; retry ${msg.attempts} of ${relay.retries} in ${delay}s`,
+        );
+        msg.retry({ delaySeconds: delay });
+      } else {
+        await setHistoryOutcome(env, job.history_id, "error", `-> ${relay.name} failed after ${msg.attempts} attempt(s): ${result.error}`);
+        msg.ack();
+      }
+    } catch (err) {
+      // Our own failure (D1 hiccup and the like), not the target's: try again shortly.
+      console.error("relay consumer:", err);
+      msg.retry({ delaySeconds: 30 });
+    }
+  }
 }
