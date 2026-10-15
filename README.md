@@ -193,6 +193,19 @@ source of truth, so use `npm ci`, not `npm install`, unless you are changing a d
 CI (`.github/workflows/ci.yml`) runs `npm ci`, `npm audit signatures`, typecheck, tests, a
 `wrangler deploy --dry-run` bundle and shellcheck on every PR, which is what automerge waits on.
 
+Security scanning runs alongside it:
+
+| workflow | runs | checks |
+| --- | --- | --- |
+| `codeql.yml` | PRs, `main`, weekly | CodeQL `security-extended` over the TypeScript/JavaScript and over the workflows themselves |
+| `security.yml` → dependency review | PRs | new or upgraded dependencies against GitHub's advisory database; fails on moderate or worse |
+| `security.yml` → npm audit | PRs, `main`, daily | the lockfile: runtime dependencies (what the Worker ships) fail on moderate, build/test tooling on high |
+| `security.yml` → zizmor | PRs, `main`, daily | the workflow files: template injection, over-broad permissions, persisted credentials, unpinned actions |
+
+CodeQL and zizmor findings land in the repository's **Security → Code scanning** tab. Secret scanning
+and push protection are repository settings rather than workflows: turn them on under
+**Settings → Code security** (free for public repositories).
+
 ## Using it
 
 ### Answers
