@@ -23,9 +23,9 @@
   },
   "packageRules": [
     {
-      "description": "Wrangler and the Workers runtime types move together; review them as one PR.",
+      "description": "Wrangler, the Miniflare it bundles (used by test/worker.test.js) and the Workers runtime types move together; review them as one PR.",
       "groupName": "Cloudflare Workers toolchain",
-      "matchPackageNames": ["wrangler", "@cloudflare/workers-types", "esbuild"]
+      "matchPackageNames": ["wrangler", "miniflare", "@cloudflare/workers-types", "esbuild"]
     },
     {
       "description": "workers-types publishes almost daily; wait a week so the group is not reopened constantly.",

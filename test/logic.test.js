@@ -168,6 +168,10 @@ test("uploaded files are scanned for credentials", () => {
   assert.deepEqual(A.scanForSecrets(enc("#!/bin/bash\napt update\n")), []);
   assert.ok(A.scanForSecrets(enc("#!/bin/bash\nPASSWORD=hunter2\n")).length > 0);
   assert.ok(A.scanForSecrets(enc("-----BEGIN OPENSSH PRIVATE KEY-----")).length > 0);
+  assert.deepEqual(A.scanForSecrets(enc("export ROOT_PASSWORD=hunter2\n")), ["password assignment"], "prefixed names count");
+  assert.deepEqual(A.scanForSecrets(enc("GITHUB_TOKEN=ghp_0123456789abcdef\n")), ["api token assignment"]);
+  assert.deepEqual(A.scanForSecrets(enc("CLIENT_SECRET: 'abcdef0123456789'\n")), ["api token assignment"]);
+  assert.deepEqual(A.scanForSecrets(enc("TOKEN_FILE=/etc/x\n")), [], "a short or path value is not a token");
 });
 
 /* ------------------------------ guards ------------------------------- */

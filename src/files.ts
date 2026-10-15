@@ -30,8 +30,9 @@ export interface FileRecord {
 
 const SECRET_PATTERNS: Array<[string, RegExp]> = [
   ["private key block", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
-  ["password assignment", /\b(pass(word|wd)?|passphrase)\s*[:=]\s*\S+/i],
-  ["api token assignment", /\b(api[_-]?key|secret|token)\s*[:=]\s*['"]?[A-Za-z0-9_\-]{12,}/i],
+  // [A-Za-z0-9_]* so ROOT_PASSWORD= and GITHUB_TOKEN= count: \b alone never fires after an underscore.
+  ["password assignment", /\b[A-Za-z0-9_]*(pass(word|wd)?|passphrase)\s*[:=]\s*\S+/i],
+  ["api token assignment", /\b[A-Za-z0-9_]*(api[_-]?key|secret|token)\s*[:=]\s*['"]?[A-Za-z0-9_\-]{12,}/i],
   ["AWS access key id", /\bAKIA[0-9A-Z]{16}\b/],
   ["bearer header", /Authorization\s*:\s*Bearer\s+\S+/i],
 ];
@@ -113,7 +114,7 @@ export async function serveFile(env: Env, name: string): Promise<Response> {
   const row = await env.DB
     .prepare("SELECT name, size, content_type, sha256, storage, blob FROM files WHERE name = ?")
     .bind(name)
-    .first<{ name: string; size: number; content_type: string; sha256: string; storage: string; blob: ArrayBuffer | null }>();
+    .first<{ name: string; size: number; content_type: string; sha256: string; storage: string; blob: ArrayBuffer | number[] | null }>();
   if (!row) return new Response("not found\n", { status: 404 });
   const headers = {
     "Content-Type": row.content_type || "application/octet-stream",
@@ -128,5 +129,7 @@ export async function serveFile(env: Env, name: string): Promise<Response> {
     if (!obj) return new Response("not found\n", { status: 404 });
     return new Response(obj.body, { headers });
   }
-  return new Response(row.blob, { headers });
+  // D1 returns a BLOB column as a plain array of byte values, which Response
+  // cannot stream; Uint8Array takes that or an ArrayBuffer alike.
+  return new Response(row.blob ? new Uint8Array(row.blob) : null, { headers });
 }
