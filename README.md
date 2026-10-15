@@ -87,6 +87,11 @@ If you do host:
 7. **Denials are recorded.** A refused fetch is written to history with its reason, so probing is visible.
 8. **Uploaded files are scanned.** A first-boot script containing something that looks like a password or
    a private key is flagged at upload — `/files/*` is as public as `/answer`.
+9. **No cross-site writes.** The configurator API is authenticated by the Access cookie, which a
+   browser may attach to a request another site triggers. Every write must come from this origin
+   (`Sec-Fetch-Site` / `Origin`), and a POST must carry a JSON or octet-stream body, which a plain HTML
+   form or a no-CORS fetch cannot send. Scripts using an Access service token are unaffected: they send
+   no fetch metadata and pass on the content type.
 
 Prefer `root-password-hashed` over `root-password` (generate with `mkpasswd -m sha-512`). It is still
 offline-crackable, so it is still treated as a secret here, but it is not a plaintext password on the wire.

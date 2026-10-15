@@ -215,3 +215,40 @@ export async function disarmAnswer(env: Env, name: string): Promise<void> {
 export function defaultArmMinutes(env: Env): number {
   return num(env.ARM_DEFAULT_MINUTES, 30);
 }
+
+/* ---------------------- Configurator write origin ------------------ */
+
+const WRITE_TYPES = ["application/json", "application/octet-stream"];
+
+/**
+ * Cross-site request forgery guard for the configurator API.
+ *
+ * The API is authenticated by the Cloudflare Access cookie, which a browser
+ * may attach to a request another site triggers. Reads are safe (another
+ * origin cannot see the response); writes are not. A write is accepted only
+ * when:
+ *   - the browser says it came from this origin (Sec-Fetch-Site, or Origin
+ *     when that is all it sends), and
+ *   - a POST carries a JSON or octet-stream body. Those types cannot be sent
+ *     cross-site without a CORS preflight, which this API never grants, so
+ *     this also covers browsers that send neither header. PUT, PATCH and
+ *     DELETE always need a preflight.
+ * Non-browser clients (curl with an Access service token) send no
+ * Sec-Fetch-Site or Origin and pass on the content type alone.
+ * Returns why the request is refused, or null.
+ */
+export function crossSiteWriteRefusal(request: Request): string | null {
+  const method = request.method.toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return null;
+
+  const site = request.headers.get("Sec-Fetch-Site");
+  if (site && site !== "same-origin") return `cross-site ${method} refused (Sec-Fetch-Site: ${site})`;
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== new URL(request.url).origin) return `cross-site ${method} refused (Origin: ${origin})`;
+
+  if (method === "POST") {
+    const type = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
+    if (!WRITE_TYPES.includes(type)) return `POST needs a Content-Type of ${WRITE_TYPES.join(" or ")}`;
+  }
+  return null;
+}

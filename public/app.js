@@ -25,12 +25,17 @@ const S = {
 /* ----------------------------- transport ----------------------------- */
 
 async function api(path, opts = {}) {
+  const method = opts.method || "GET";
+  const write = method !== "GET" && method !== "HEAD";
+  // Writes always carry a non-form Content-Type: the server refuses POSTs
+  // that another site could forge with a plain form (see crossSiteWriteRefusal).
+  const isFile = opts.body instanceof Uint8Array;
   const res = await fetch("/api" + path, {
-    method: opts.method || "GET",
-    headers: opts.body instanceof Uint8Array
-      ? { "X-File-Type": opts.contentType || "application/octet-stream" }
-      : opts.body ? { "Content-Type": "application/json" } : {},
-    body: opts.body instanceof Uint8Array ? opts.body : opts.body ? JSON.stringify(opts.body) : undefined,
+    method,
+    headers: isFile
+      ? { "Content-Type": "application/octet-stream", "X-File-Type": opts.contentType || "application/octet-stream" }
+      : write ? { "Content-Type": "application/json" } : {},
+    body: isFile ? opts.body : write ? JSON.stringify(opts.body ?? {}) : undefined,
   });
   const text = await res.text();
   let data = {};

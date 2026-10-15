@@ -14,7 +14,7 @@ import {
   type AnswerRecord, type ServeMode,
 } from "./answers";
 import { parseAnswerToml } from "./tomlimport";
-import { armAnswer, canServe, defaultArmMinutes, disarmAnswer } from "./guards";
+import { armAnswer, canServe, crossSiteWriteRefusal, defaultArmMinutes, disarmAnswer } from "./guards";
 import { deleteFile, listFiles, putFile, FileError, FILE_NAME_RE } from "./files";
 import { RELAY_MASK, RelayError, deleteRelay, deliver, getRelay, listRelays, maskRelay, saveRelay } from "./relay";
 import { SECTIONS, SECTION_ORDER } from "./schema";
@@ -81,6 +81,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
   } catch (err) {
     return errorResponse(err);
   }
+  const refusal = crossSiteWriteRefusal(request);
+  if (refusal) return json({ error: refusal }, 403);
   try {
     return await route(request, env, identity);
   } catch (err) {
