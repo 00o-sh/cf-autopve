@@ -11,7 +11,8 @@
  */
 
 import type { Env } from "./env";
-import { clientIp, num } from "./env";
+import { clientIp, num, trimTrailing } from "./env";
+import { publicError } from "./errors";
 import { AccessError, requireIdentity } from "./access";
 import { handleApi } from "./api";
 import { addHistory, rateLimited, recordSysinfoKeys, trimHistory } from "./db";
@@ -27,7 +28,7 @@ const TEXT = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, "") || "/";
+    const path = trimTrailing(url.pathname, "/") || "/";
 
     try {
       if (path === "/healthz") return new Response("ok\n", { headers: TEXT });
@@ -55,9 +56,10 @@ async function handleUi(request: Request, env: Env): Promise<Response> {
   try {
     await requireIdentity(request, env);
   } catch (err) {
-    const status = err instanceof AccessError ? err.status : 500;
+    if (!(err instanceof AccessError)) console.error("ui error:", err);
+    const { status, message } = publicError(err);
     return new Response(
-      `${(err as Error).message}\n\nThe configurator is protected by Cloudflare Access. ` +
+      `${message}\n\nThe configurator is protected by Cloudflare Access. ` +
         `The installer endpoints (/answer, /hook, /files) are unaffected.\n`,
       { status, headers: TEXT },
     );

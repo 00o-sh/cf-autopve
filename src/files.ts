@@ -11,10 +11,9 @@
 import type { Env } from "./env";
 import { num } from "./env";
 import { sha256Hex } from "./crypto";
+import { PublicError } from "./errors";
 
-export class FileError extends Error {
-  status = 400;
-}
+export class FileError extends PublicError {}
 
 export const FILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 
