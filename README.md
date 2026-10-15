@@ -112,7 +112,7 @@ npm ci                              # Node 22+ (see .nvmrc); installs exactly th
 
 # 1. database
 npx wrangler d1 create autopve                 # put the returned id in wrangler.toml
-npx wrangler d1 migrations apply autopve --remote   # re-run after upgrading: new migrations add tables
+npx wrangler d1 migrations apply autopve --remote   # first time; `npm run deploy` does it from then on
 
 # 2. encryption key (required before any credential can be stored)
 openssl rand -base64 32 | npx wrangler secret put ANSWER_ENC_KEY
@@ -120,9 +120,16 @@ openssl rand -base64 32 | npx wrangler secret put ANSWER_ENC_KEY
 # 3. a token the installer must present (optional for /answer and /files, required for relays)
 openssl rand -hex 24 | npx wrangler secret put SERVE_TOKEN
 
-# 4. deploy
-npx wrangler deploy
+# 4. deploy: applies any pending migrations, then deploys
+npm run deploy
 ```
+
+**Migrations run on every deploy.** `npm run deploy` applies pending migrations in `migrations/` to the
+production database, then deploys; when a migration fails, nothing is deployed. With Workers Builds, set
+the deploy command (Settings → Build → Deploy command) to `npm run deploy`, and give the build's API
+token **D1: Edit** in addition to Workers Scripts: Edit. Migrations run *before* the new code goes live,
+so the old code runs against the new schema for a moment: keep migrations additive (new tables and
+nullable columns), never rename or drop in the same release that stops using something.
 
 Then put **Cloudflare Access** in front of the configurator:
 
@@ -148,12 +155,14 @@ configurator refuses to load (fail closed); the installer endpoints keep working
 
 ### PR previews (Workers Builds)
 
-If the repository is connected to Workers Builds, every PR runs `npx wrangler preview`, which needs the
-`[previews]` block in `wrangler.toml`:
+If the repository is connected to Workers Builds, every PR runs a preview build (by default
+`npx wrangler preview`), which needs the `[previews]` block in `wrangler.toml`. Set the non-production
+branch deploy command to `npm run deploy:preview` so the preview database is migrated first.
 
 - Previews bind their own D1 database (`autopve-preview`), never production: a preview runs a PR's code
-  before anyone has reviewed it. Load its schema the same way as production, and again when a PR adds
-  a migration: `npx wrangler d1 migrations apply autopve-preview --remote`.
+  before anyone has reviewed it. `preview_database_id` on the production binding names the same
+  database, which is how `npm run db:migrate:preview` finds it; `npm test` checks the two agree. A PR
+  that adds a migration applies it to the preview database only; production gets it on merge.
 - `[previews.vars]` must repeat every key in `[vars]`, or the preview build fails. `npm test` checks this.
 - The Access values are production's. The preview hostname isn't covered by the Access application, so
   the preview UI answers 401 and only the installer endpoints respond. Don't set `DEV_ALLOW_INSECURE_UI`
