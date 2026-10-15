@@ -21,6 +21,7 @@ import { FORMATS } from "./validate";
 import { emitToml } from "./toml";
 import { deleteVersions, describeSnapshot, getVersion, listVersions, recordVersion, renameVersions } from "./versions";
 import { forgetInstall, forgetInstalled, listInstalls } from "./installs";
+import { publicError } from "./errors";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
@@ -28,8 +29,7 @@ const json = (data: unknown, status = 200) =>
 const REDACTION = "REDACTED-BY-AUTOPVE";
 
 function errorResponse(err: unknown): Response {
-  const status = (err as any)?.status ?? 500;
-  const message = (err as Error)?.message ?? "unexpected error";
+  const { status, message } = publicError(err);
   if (status >= 500) console.error("api error:", err);
   return json({ error: message }, status);
 }

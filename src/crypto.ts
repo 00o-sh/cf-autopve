@@ -7,6 +7,8 @@
  * plaintext credential; a dump of the database is useless without the secret.
  */
 
+import { PublicError } from "./errors";
+
 export const ENC_PREFIX = "enc:v1:";
 
 export function b64encode(bytes: ArrayBuffer | Uint8Array): string {
@@ -34,7 +36,7 @@ export function isEncrypted(v: unknown): v is string {
 async function importKey(rawKey: string): Promise<CryptoKey> {
   const raw = b64decode(rawKey.trim());
   if (raw.length !== 32) {
-    throw new Error("ANSWER_ENC_KEY must be a base64-encoded 32-byte key (openssl rand -base64 32)");
+    throw new PublicError("ANSWER_ENC_KEY must be a base64-encoded 32-byte key (openssl rand -base64 32)", 500);
   }
   return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }

@@ -9,6 +9,7 @@
 
 import type { Env } from "./env";
 import { bool } from "./env";
+import { PublicError } from "./errors";
 import { encryptString, decryptString, isEncrypted } from "./crypto";
 import { isSecretKey, SECTION_ORDER, DEFAULT_ANSWER_DOC } from "./schema";
 import { cleanComment, coerceValue, type AnswerDoc } from "./toml";
@@ -38,9 +39,7 @@ export interface AnswerRecord {
   updated_by: string;
 }
 
-export class ValidationError extends Error {
-  status = 400;
-}
+export class ValidationError extends PublicError {}
 
 interface AnswerRow {
   name: string;

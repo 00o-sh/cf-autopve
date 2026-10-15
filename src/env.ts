@@ -38,6 +38,13 @@ export function num(v: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+/** `s` without trailing `ch`s. A loop, not /x+$/: that regex is quadratic on long runs of `ch`. */
+export function trimTrailing(s: string, ch: string): string {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === ch) end--;
+  return s.slice(0, end);
+}
+
 export function bool(v: string | undefined, fallback = false): boolean {
   if (v === undefined) return fallback;
   return /^(true|1|yes)$/i.test(v.trim());

@@ -1109,3 +1109,23 @@ test("every [vars] key is repeated in [previews.vars], and previews never touch 
     assert.notEqual(d.preview_database_id, d.database_id);
   }
 });
+
+test("only errors written for the user reach the response; anything else stays in the logs", () => {
+  assert.deepEqual(A.publicError(new A.ValidationError("bad name")), { status: 400, message: "bad name" });
+  assert.deepEqual(A.publicError(new A.FileError("too big")), { status: 400, message: "too big" });
+  assert.deepEqual(A.publicError(new A.AccessError("no token", 401)), { status: 401, message: "no token" });
+  const internal = new Error("D1_ERROR: no such table: installs at /src/installs.ts:82");
+  internal.status = 400; // a status alone does not make a message safe to show
+  assert.deepEqual(A.publicError(internal), { status: 500, message: A.INTERNAL_ERROR });
+  assert.deepEqual(A.publicError("thrown string"), { status: 500, message: A.INTERNAL_ERROR });
+});
+
+test("trimTrailing strips runs of a character in linear time", () => {
+  assert.equal(A.trimTrailing("https://team.cloudflareaccess.com///", "/"), "https://team.cloudflareaccess.com");
+  assert.equal(A.trimTrailing("////", "/"), "");
+  assert.equal(A.trimTrailing("/answer", "/"), "/answer");
+  const long = "/" + "/".repeat(200_000) + "x" + "/".repeat(200_000);
+  const t = Date.now();
+  assert.equal(A.trimTrailing(long, "/").length, 200_002);
+  assert.ok(Date.now() - t < 200);
+});

@@ -9,6 +9,8 @@
  */
 
 import type { Env } from "./env";
+import { trimTrailing } from "./env";
+import { PublicError } from "./errors";
 
 export interface Identity {
   email: string;
@@ -17,11 +19,9 @@ export interface Identity {
   dev: boolean;
 }
 
-export class AccessError extends Error {
-  status: number;
+export class AccessError extends PublicError {
   constructor(message: string, status = 403) {
-    super(message);
-    this.status = status;
+    super(message, status);
   }
 }
 
@@ -31,7 +31,7 @@ let jwksCache: { url: string; keys: Jwk[]; fetchedAt: number } | null = null;
 const JWKS_TTL_MS = 60 * 60 * 1000;
 
 function teamDomain(env: Env): string {
-  const raw = (env.ACCESS_TEAM_DOMAIN || "").trim().replace(/\/+$/, "");
+  const raw = trimTrailing((env.ACCESS_TEAM_DOMAIN || "").trim(), "/");
   if (!raw) return "";
   return raw.startsWith("http") ? raw : `https://${raw}`;
 }
