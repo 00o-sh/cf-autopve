@@ -137,6 +137,19 @@ The Worker verifies the Access JWT itself — signature against your team's JWKS
 so a request that bypasses the Access hostname still gets nothing. Until those two vars are set, the
 configurator refuses to load (fail closed); the installer endpoints keep working.
 
+### PR previews (Workers Builds)
+
+If the repository is connected to Workers Builds, every PR runs `npx wrangler preview`, which needs the
+`[previews]` block in `wrangler.toml`:
+
+- Previews bind their own D1 database (`autopve-preview`), never production: a preview runs a PR's code
+  before anyone has reviewed it. Load its schema the same way as production, and again when a PR adds
+  a migration: `npx wrangler d1 migrations apply autopve-preview --remote`.
+- `[previews.vars]` must repeat every key in `[vars]`, or the preview build fails. `npm test` checks this.
+- The Access values are production's. The preview hostname isn't covered by the Access application, so
+  the preview UI answers 401 and only the installer endpoints respond. Don't set `DEV_ALLOW_INSECURE_UI`
+  there. Previews get no secrets unless you add them with `npx wrangler preview secret put`.
+
 ### Local development
 
 ```bash

@@ -51,3 +51,27 @@ ANSWER_FORMAT = "auto"
 #   ANSWER_ENC_KEY  - base64 32-byte AES-256-GCM key. REQUIRED to store any secret value.
 #   SERVE_TOKEN     - optional shared token; when set, /answer and /hook require
 #                     /answer/<token> in the path or an X-AutoPVE-Token header.
+
+# --- Worker Previews (`wrangler preview`, run by Workers Builds for every PR) ---
+# Previews run a PR's code before review, so they get their own empty database:
+# never point this at production. Schema: npx wrangler d1 migrations apply autopve-preview --remote
+# Every key in [vars] must also be listed here (test/logic.test.js checks it).
+# The Access values are production's: the preview hostname is not behind the Access app,
+# so the preview UI stays locked (401) and only the installer endpoints answer.
+# Never set DEV_ALLOW_INSECURE_UI here. Preview secrets: npx wrangler preview secret put.
+[[previews.d1_databases]]
+binding = "DB"
+database_name = "autopve-preview"
+database_id = "8fc4644f-e7f8-4c65-80b5-a8e8c38f8c88"
+
+[previews.vars]
+ACCESS_TEAM_DOMAIN = "https://bitbybit.cloudflareaccess.com"
+ACCESS_AUD = "d1c9f2d9842c6b0ae4261c265632a3ded9f5e7056a50ccee62d540dda5bb0695"
+ARM_DEFAULT_MINUTES = "30"
+REQUIRE_HTTPS = "true"
+ALLOW_ALWAYS_SECRETS = "false"
+RATE_LIMIT_PER_MIN = "30"
+FILE_MAX_BYTES = "1000000"
+HISTORY_MAX_BYTES = "131072"
+HISTORY_LIMIT = "1000"
+ANSWER_FORMAT = "auto"
