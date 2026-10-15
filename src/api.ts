@@ -20,6 +20,7 @@ import { RELAY_MASK, RelayError, deleteRelay, deliver, getRelay, listRelays, mas
 import { SECTIONS, SECTION_ORDER } from "./schema";
 import { FORMATS } from "./validate";
 import { emitToml } from "./toml";
+import { deleteVersions, describeSnapshot, getVersion, listVersions, recordVersion, renameVersions } from "./versions";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
@@ -138,6 +139,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
         { secrets_ack: source?.secrets_ack ?? false, serve_mode: source?.serve_mode, priority: source?.priority, allow_cidrs: source?.allow_cidrs },
         identity.email,
       );
+      await recordVersion(env, record, identity.email, source ? `copy of ${source.name}` : "created");
       await audit(env, identity.email, source ? "answer.copy" : "answer.create", newName, source ? `from ${source.name}` : "");
       return json({ answer: publicAnswer(record) }, 201);
     }
@@ -164,11 +166,13 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
           },
           identity.email,
         );
+        await recordVersion(env, saved, identity.email, "save", record);
         await audit(env, identity.email, "answer.save", name, saved.has_secrets ? `holds ${secretKeysIn(saved.doc).join(", ")}` : "");
         return json({ answer: publicAnswer(saved), preview: await renderToml(env, saved, false), problems: await problemsFor(env, saved) });
       }
       if (method === "DELETE") {
         await deleteAnswer(env, name);
+        await deleteVersions(env, name).catch((err) => console.error("answer history not removed:", err));
         await audit(env, identity.email, "answer.delete", name);
         return json({ ok: true });
       }
@@ -184,8 +188,33 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
       if (await getAnswer(env, to)) throw new ValidationError(`An answer named "${to}" already exists.`);
       await env.DB.prepare("UPDATE answers SET name = ?, updated_at = ?, updated_by = ? WHERE name = ?")
         .bind(to, Date.now(), identity.email, name).run();
+      await renameVersions(env, name, to).catch((err) => console.error("answer history not renamed:", err));
       await audit(env, identity.email, "answer.rename", name, `to ${to}`);
       return json({ answer: publicAnswer((await getAnswer(env, to))!) });
+    }
+
+    if (action === "versions") {
+      const id = parts[3] === undefined ? null : Number(parts[3]);
+      if (id === null && method === "GET") return json({ versions: await listVersions(env, name) });
+      if (id === null || !Number.isInteger(id)) return json({ error: "no such version" }, 404);
+      const version = await getVersion(env, name, id);
+      if (!version) return json({ error: "no such version" }, 404);
+      if (!parts[4] && method === "GET") {
+        const { snapshot, ...meta } = version;
+        return json({ version: meta, text: await describeSnapshot(snapshot) });
+      }
+      if (parts[4] === "restore" && method === "POST") {
+        const s = version.snapshot;
+        const saved = await saveAnswer(
+          env, name, s.doc ?? {},
+          { priority: s.priority, serve_mode: s.serve_mode, allow_cidrs: s.allow_cidrs, notes: s.notes },
+          identity.email,
+        );
+        await recordVersion(env, saved, identity.email, `restore of #${id}`, record);
+        await audit(env, identity.email, "answer.restore", name, `version #${id}`);
+        return json({ answer: publicAnswer(saved), preview: await renderToml(env, saved, false), problems: await problemsFor(env, saved) });
+      }
+      return json({ error: "method not allowed" }, 405);
     }
 
     if (action === "arm" && method === "POST") {

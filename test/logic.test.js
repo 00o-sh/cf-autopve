@@ -303,6 +303,80 @@ test("always-mode answers need no claim", async () => {
   assert.equal(await A.claimServe({ DB: null }, { ...baseAnswer, serve_mode: "always" }), true);
 });
 
+/* ---------------------------- answer versions -------------------------- */
+
+// D1 over node:sqlite with every migration applied, enough of the API for versions.ts.
+async function d1All() {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const dir = new URL("../migrations/", import.meta.url);
+  const db = new DatabaseSync(":memory:");
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) db.exec(readFileSync(new URL(f, dir), "utf8"));
+  const stmt = (sql, args) => ({
+    first: async () => db.prepare(sql).get(...args) ?? null,
+    run: async () => db.prepare(sql).run(...args),
+    all: async () => ({ results: db.prepare(sql).all(...args) }),
+  });
+  return { raw: db, prepare: (sql) => ({ ...stmt(sql, []), bind: (...args) => stmt(sql, args) }) };
+}
+
+const rec = (doc, extra = {}) => ({ ...baseAnswer, name: "node1", doc, priority: 100, serve_mode: "armed", allow_cidrs: [], notes: "", updated_at: 1000, updated_by: "old@example.com", ...extra });
+
+test("saves become versions; a no-op save does not, and history is trimmed", async () => {
+  const env = { DB: await d1All(), ANSWER_VERSIONS_KEEP: "3" };
+  await A.recordVersion(env, rec({ global: { keyboard: "de" } }), "a@example.com", "save");
+  await A.recordVersion(env, rec({ global: { keyboard: "de" } }), "a@example.com", "save");
+  assert.equal((await A.listVersions(env, "node1")).length, 1, "identical state is not recorded twice");
+  for (const k of ["fr", "us", "it"]) await A.recordVersion(env, rec({ global: { keyboard: k } }), "b@example.com", "save");
+  const versions = await A.listVersions(env, "node1");
+  assert.deepEqual(versions.map((v) => v.reason), ["save", "save", "save"]);
+  assert.equal(versions.length, 3, "only the newest ANSWER_VERSIONS_KEEP are kept");
+  assert.equal((await A.getVersion(env, "node1", versions[0].id)).snapshot.doc.global.keyboard, "it", "newest first");
+});
+
+test("the first tracked save also keeps the state from before history existed", async () => {
+  const env = { DB: await d1All() };
+  const before = rec({ global: { keyboard: "de" } });
+  await A.recordVersion(env, rec({ global: { keyboard: "fr" } }), "a@example.com", "save", before);
+  const [now, then] = await A.listVersions(env, "node1");
+  assert.equal(then.reason, "state before history was kept");
+  assert.equal(then.created_by, "old@example.com");
+  assert.equal((await A.getVersion(env, "node1", then.id)).snapshot.doc.global.keyboard, "de");
+  assert.equal(now.created_by, "a@example.com");
+});
+
+test("version history follows renames and goes with the answer", async () => {
+  const env = { DB: await d1All() };
+  await A.recordVersion(env, rec({}), "a@example.com", "created");
+  await A.renameVersions(env, "node1", "node2");
+  assert.equal((await A.listVersions(env, "node1")).length, 0);
+  assert.equal((await A.listVersions(env, "node2")).length, 1);
+  await A.deleteVersions(env, "node2");
+  assert.equal((await A.listVersions(env, "node2")).length, 0);
+});
+
+test("history is best effort: a missing table never breaks a save", async () => {
+  const env = { DB: { prepare: () => { throw new Error("no such table: answer_versions"); } } };
+  const quiet = console.error; console.error = () => {};
+  try { await assert.doesNotReject(A.recordVersion(env, rec({}), "a@example.com", "save")); } finally { console.error = quiet; }
+});
+
+test("diff text fingerprints credentials and puts each list item on its own line", async () => {
+  const snap = (pw) => ({ doc: { global: { keyboard: "de", "root-password": pw }, must_contain: ["R620", "R630"], comments: { global: { keyboard: "German" } } },
+    priority: 10, serve_mode: "armed", allow_cidrs: ["10.0.0.0/24"], notes: "" });
+  const a = await A.describeSnapshot(snap("enc:v1:aaaa:bbbb"));
+  const b = await A.describeSnapshot(snap("enc:v1:aaaa:cccc"));
+  assert.match(a, /# German\nkeyboard = "de"/);
+  assert.match(a, /root-password = "\(stored credential [0-9a-f]{8}\)"/);
+  assert.ok(!a.includes("enc:v1"), "no ciphertext in the text");
+  assert.notEqual(a, b, "a changed credential shows as a changed fingerprint");
+  assert.equal(a, await A.describeSnapshot(snap("enc:v1:aaaa:bbbb")), "stable for the same state");
+  assert.match(a, /# must_contain\[0\] = "R620"\n# must_contain\[1\] = "R630"/);
+  assert.match(a, /# allow_cidrs\[0\] = "10.0.0.0\/24"/);
+  assert.match(a, /# serve_mode = "armed"/);
+  assert.ok(!a.includes("comments"), "comments are in the TOML, not repeated as metadata");
+});
+
 /* ------------------------------ hook guard ---------------------------- */
 
 test("relays are refused outright without a SERVE_TOKEN", () => {
