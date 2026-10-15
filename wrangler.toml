@@ -15,6 +15,9 @@ run_worker_first = true
 binding = "DB"
 database_name = "autopve"
 database_id = "483d7b40-0907-41c2-a84c-fd567e84f0aa"
+# The preview database below, so `wrangler d1 migrations apply autopve --remote --preview` can find it
+# (that command only reads this top-level block). `npm run deploy:preview` uses it.
+preview_database_id = "8fc4644f-e7f8-4c65-80b5-a8e8c38f8c88"
 
 # Optional: durable relay delivery. Without it, /hook delivers inside the request's
 # ~30s background window (retries that do not fit are logged as stopped). With it,
@@ -70,7 +73,8 @@ ANSWER_FORMAT = "auto"
 
 # --- Worker Previews (`wrangler preview`, run by Workers Builds for every PR) ---
 # Previews run a PR's code before review, so they get their own empty database:
-# never point this at production. Schema: npx wrangler d1 migrations apply autopve-preview --remote
+# never point this at production. Its database_id must equal preview_database_id above
+# (test/logic.test.js checks it); `npm run deploy:preview` migrates it before each preview.
 # Every key in [vars] must also be listed here (test/logic.test.js checks it).
 # The Access values are production's: the preview hostname is not behind the Access app,
 # so the preview UI stays locked (401) and only the installer endpoints answer.

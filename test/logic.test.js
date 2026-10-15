@@ -1101,4 +1101,11 @@ test("every [vars] key is repeated in [previews.vars], and previews never touch 
   assert.ok(!("DEV_ALLOW_INSECURE_UI" in cfg.previews.vars), "previews must keep Access enforced");
   const prod = cfg.d1_databases.map((d) => d.database_id);
   for (const d of cfg.previews.d1_databases) assert.ok(!prod.includes(d.database_id), `preview binding ${d.binding} points at a production database`);
+  // `npm run deploy:preview` migrates the database named by preview_database_id, so it must be the
+  // one previews actually bind, and never production.
+  for (const d of cfg.d1_databases) {
+    const preview = cfg.previews.d1_databases.find((p) => p.binding === d.binding);
+    assert.equal(d.preview_database_id, preview?.database_id, `preview_database_id of ${d.binding} must match [[previews.d1_databases]]`);
+    assert.notEqual(d.preview_database_id, d.database_id);
+  }
 });
