@@ -30,6 +30,10 @@
       <ul id="answer-list" class="list"></ul>
     </section>
     <section>
+      <h2>Installs</h2>
+      <ul class="list"><li id="installs-open"><span>dashboard</span><span id="installs-count" class="muted"></span></li></ul>
+    </section>
+    <section>
       <h2>Relays</h2>
       <div class="rowbtns">
         <button id="relay-add" title="New relay">+</button>
@@ -79,6 +83,17 @@
         </div>
       </div>
       <div id="relay-body"></div>
+    </div>
+
+    <div id="installs-pane" class="pane" hidden>
+      <div class="panehead">
+        <h1>Installs</h1>
+        <div class="panehead-right">
+          <button id="installs-clear" title="Remove machines that finished installing">clear installed</button>
+          <button id="installs-refresh">Refresh</button>
+        </div>
+      </div>
+      <div id="installs-body"></div>
     </div>
 
     <div id="files-pane" class="pane" hidden>

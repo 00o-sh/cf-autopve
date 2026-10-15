@@ -57,6 +57,8 @@ HISTORY_MAX_BYTES = "131072"
 # History rows to keep (older rows are trimmed on write).
 HISTORY_LIMIT = "1000"
 ANSWER_VERSIONS_KEEP = "50"
+INSTALL_TIMEOUT_MINUTES = "120"
+INSTALLS_LIMIT = "2000"
 # Answer format: "auto" sends JSON when the installer prefers it (it does, on current ISOs),
 # otherwise TOML. "toml" always sends TOML.
 ANSWER_FORMAT = "auto"
@@ -90,3 +92,5 @@ HISTORY_MAX_BYTES = "131072"
 HISTORY_LIMIT = "1000"
 ANSWER_FORMAT = "auto"
 ANSWER_VERSIONS_KEEP = "50"
+INSTALL_TIMEOUT_MINUTES = "120"
+INSTALLS_LIMIT = "2000"

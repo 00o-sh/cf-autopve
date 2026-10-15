@@ -21,6 +21,7 @@ import { SECTIONS, SECTION_ORDER } from "./schema";
 import { FORMATS } from "./validate";
 import { emitToml } from "./toml";
 import { deleteVersions, describeSnapshot, getVersion, listVersions, recordVersion, renameVersions } from "./versions";
+import { forgetInstall, forgetInstalled, listInstalls } from "./installs";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
@@ -295,6 +296,25 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
       toml: emitToml(selection.merged, { redact: true, redactionText: REDACTION }),
       problems: lintMerged(selection.merged),
     });
+  }
+
+  /* ------------------------------ installs ----------------------------- */
+  if (head === "installs") {
+    const id = parts[1];
+    if (!id && method === "GET") {
+      return json({ installs: await listInstalls(env), timeout_minutes: num(env.INSTALL_TIMEOUT_MINUTES, 120) });
+    }
+    if (!id && method === "DELETE" && url.searchParams.get("status") === "installed") {
+      const removed = await forgetInstalled(env);
+      await audit(env, identity.email, "installs.clear", "installed", `${removed} removed`);
+      return json({ removed });
+    }
+    if (id && method === "DELETE") {
+      await forgetInstall(env, id);
+      await audit(env, identity.email, "installs.forget", id);
+      return json({ ok: true });
+    }
+    return json({ error: "method not allowed" }, 405);
   }
 
   /* ------------------------------ history ------------------------------ */

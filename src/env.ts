@@ -18,6 +18,10 @@ export interface Env {
   HISTORY_LIMIT?: string;
   /** Saved versions kept per answer (default 50). */
   ANSWER_VERSIONS_KEEP?: string;
+  /** Minutes after an answer is served before a silent machine shows as "no report" (default 120). */
+  INSTALL_TIMEOUT_MINUTES?: string;
+  /** Machines kept on the Installs dashboard (default 2000). */
+  INSTALLS_LIMIT?: string;
   /** "auto" (default): JSON when the installer prefers it, else TOML. "toml": always TOML. */
   ANSWER_FORMAT?: string;
 

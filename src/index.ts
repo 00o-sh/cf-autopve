@@ -5,6 +5,7 @@
  *   /api/*            configurator API           (Cloudflare Access required)
  *   POST /answer      installer answer endpoint  (unauthenticated by nature — see guards.ts)
  *   POST /hook/<name> post-installation webhook -> outbound relay (needs SERVE_TOKEN)
+ *   POST /hook        post-installation webhook, install tracking only (needs SERVE_TOKEN)
  *   GET  /files/<n>   first-boot scripts and other hosted files
  *   GET  /healthz     liveness
  */
@@ -19,6 +20,7 @@ import { bodyTokenOk, canServe, claimServe, hookAllowed, tokenOk } from "./guard
 import { serveFile } from "./files";
 import { MAX_QUEUED_JOB_BYTES, deliver, getRelay, handleRelayBatch, type RelayJob } from "./relay";
 import { emitJson, emitToml, prefersJson } from "./toml";
+import { trackAnswer, trackInstalled } from "./installs";
 
 const TEXT = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" };
 
@@ -30,7 +32,7 @@ export default {
     try {
       if (path === "/healthz") return new Response("ok\n", { headers: TEXT });
       if (path === "/answer" || path.startsWith("/answer/")) return await handleAnswer(request, env, ctx, path);
-      if (path.startsWith("/hook/")) return await handleHook(request, env, ctx, path);
+      if (path === "/hook" || path.startsWith("/hook/")) return await handleHook(request, env, ctx, path);
       if (path.startsWith("/files/")) return await handleFile(request, env, path);
       if (path === "/api" || path.startsWith("/api/")) return await handleApi(request, env);
       return await handleUi(request, env);
@@ -113,6 +115,11 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
           ip, outcome: "denied", detail: reason, response: "", system_info: systemInfoRaw,
         });
         await recordSysinfoKeys(env, systemInfoRaw);
+        // Only a caller holding the token gets a dashboard row: anyone can POST
+        // a made-up machine to /answer, and that must not fill the table.
+        if (env.SERVE_TOKEN && tokenOk(env, request, pathToken)) {
+          await trackAnswer(env, systemInfo, { answer: record.name, status: "refused", detail: reason, ip, systemName: systemName(systemInfo) });
+        }
       })(),
     );
     return new Response(`refused: ${reason}\n`, { status: 403, headers: TEXT });
@@ -146,6 +153,7 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
         response: redacted, system_info: systemInfoRaw,
       });
       await recordSysinfoKeys(env, systemInfoRaw);
+      await trackAnswer(env, systemInfo, { answer: record.name, status: "served", detail: asJson ? "as JSON" : "", ip, systemName: systemName(systemInfo) });
       if (id % 25 === 0) await trimHistory(env);
     })(),
   );
@@ -168,7 +176,7 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
 
 async function handleHook(request: Request, env: Env, ctx: ExecutionContext, path: string): Promise<Response> {
   if (request.method !== "POST") return new Response("POST only\n", { status: 405, headers: { ...TEXT, Allow: "POST" } });
-  const segments = path.slice("/hook/".length).split("/").filter(Boolean).map(decodeURIComponent);
+  const segments = path.slice("/hook".length).split("/").filter(Boolean).map(decodeURIComponent);
   const name = segments[0] ?? "";
   const pathToken = segments[1] ?? null;
   const ip = clientIp(request);
@@ -195,10 +203,25 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
     rawBody = JSON.stringify(payload);
   }
 
-  const relay = await getRelay(env, name);
-  if (!relay || !relay.enabled) return new Response(`no enabled relay named "${name}"\n`, { status: 404, headers: TEXT });
   // A token is a credential either way: never into history or the key index.
   const infoRaw = JSON.stringify(payload && typeof payload === "object" && "token" in payload ? { ...payload, token: undefined } : payload);
+  const track = () => trackInstalled(env, payload, { ip, systemName: systemName(payload), detail: name ? `reported via /hook/${name}` : "reported" });
+
+  if (!name) {
+    // No relay: the webhook only marks the machine installed.
+    ctx.waitUntil((async () => {
+      await addHistory(env, {
+        ts: Date.now(), kind: "hook", answer: null, system_name: systemName(payload), ip,
+        outcome: "recorded", detail: "install reported", response: "", system_info: infoRaw,
+      });
+      await recordSysinfoKeys(env, infoRaw);
+      await track();
+    })());
+    return new Response("accepted\n", { status: 202, headers: TEXT });
+  }
+
+  const relay = await getRelay(env, name);
+  if (!relay || !relay.enabled) return new Response(`no enabled relay named "${name}"\n`, { status: 404, headers: TEXT });
 
   const job: RelayJob = { relay: relay.name, history_id: null, payload, raw_body: rawBody };
   const queueable = !!env.RELAY_QUEUE && JSON.stringify(job).length <= MAX_QUEUED_JOB_BYTES;
@@ -207,7 +230,10 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
     outcome: queueable ? "queued" : "relaying", detail: `-> ${relay.name}`, response: "", system_info: infoRaw,
   });
   job.history_id = id;
-  ctx.waitUntil(recordSysinfoKeys(env, infoRaw));
+  ctx.waitUntil((async () => {
+    await recordSysinfoKeys(env, infoRaw);
+    await track();
+  })());
 
   if (queueable) {
     // Enqueued before the 202, so an accepted payload survives this invocation.
