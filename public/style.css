@@ -178,3 +178,5 @@ td.bad { color: var(--bad); }
 .installs-summary { display: flex; gap: 8px; flex-wrap: wrap; }
 .pill.run { border-color: #4aa3df; color: #a8d8ff; }
 .pill.bad { border-color: #e5484d; color: #ffadb3; }
+.matchrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; margin: 6px 0; }
+p.bad { color: var(--bad); }

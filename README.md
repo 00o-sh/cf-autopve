@@ -211,10 +211,27 @@ and push protection are repository settings rather than workflows: turn them on 
 ### Answers
 
 `Default` is the base; every other answer inherits from it and overrides key by key, exactly as upstream.
-An answer is chosen by its **filters**: it matches when any *must contain* string appears in the raw JSON
-the installer POSTs, and no *must not contain* string does. First match by `priority` (then name) wins;
-no match falls back to `Default`. The Filters tab has a dry-run box — paste a `system_info` payload from
-History and see which answer would win and whether it would actually be served.
+An answer is chosen by its **filters**. First match by `priority` (then name) wins; no match falls back
+to `Default`. The Filters tab has a dry-run box — paste a `system_info` payload from History and see which
+answer would win, which rules hit (and against which values), and whether it would actually be served.
+
+**Match rules** test one field of the posted `system_info` against a glob:
+
+| field | example pattern |
+| --- | --- |
+| `network_interfaces[].mac` | `24:8a:07:1e:05:bc` |
+| `dmi.system.serial` | `9000*` |
+| `dmi.system.uuid`, `dmi.system.name`, `dmi.system.sku` | `PowerEdge R6*` |
+| `dmi.baseboard.serial`, `dmi.chassis.serial`, `dmi.chassis.asset_tag` | `ASSET-0[0-4]?` |
+| `product.product`, `iso.release` | `pve`, `9.*` |
+
+- A field is a dotted path; `[]` means "any element of this list", so the MAC rule matches if any NIC
+  has that address. Any path works, the list above is just what the editor suggests.
+- Patterns are anchored, case-insensitive globs: `*` any run, `?` one character, `[abc]` / `[!a]` sets.
+- *All rules* requires every rule to hit; *any rule* requires one.
+- The older **text filter** is still there: *must not contain* vetoes an answer whenever one of its
+  strings appears anywhere in the raw JSON. With no rules, *must contain* alone decides as before (any
+  string present). With rules, a non-empty *must contain* must also hit.
 
 > **Filters are for routing, not security.** They match against the JSON the client POSTs, and the
 > client writes that JSON. Anyone who can reach `/answer` can claim any MAC address, serial number or
@@ -240,6 +257,40 @@ from it, and **Restore** it.
   history at the next save, which also records the state they had until then.
 - Versions need migration `0002`; without it answers still save, and the tab shows the error.
 
+#### Machine tables: one answer for a rack of machines
+
+Instead of one answer per node, give an answer a **machine table** (Filters tab) and use `{{ column }}`
+placeholders in its values:
+
+```csv
+mac,hostname,ip
+24:8a:07:1e:05:bc,pve1,10.0.0.11/24
+24:8a:07:1e:05:bd,pve2,10.0.0.12/24
+```
+
+```toml
+[global]
+fqdn = "{{ hostname }}.lab.example"
+
+[network]
+source = "from-answer"
+cidr = "{{ ip }}"
+```
+
+- The first column is the key, compared (as a glob, case-insensitive) with the **key field**, by default
+  `network_interfaces[].mac`. `dmi.system.serial` works just as well. Paste CSV, edit it in place, or
+  *Load CSV…*; comma, semicolon and tab delimited files all load.
+- An answer with rows only claims machines that have a row, so the table is its routing as well.
+  Match rules and text filters, if also set, must agree.
+- When served, the machine's row fills the placeholders, including ones inherited from `Default`. An
+  answer without a table uses `Default`'s. A placeholder that can't be filled (no row, no such column,
+  an empty cell) refuses the request with the reason in History; a half-rendered answer is never served.
+- On save every row is rendered and checked like a typed value, so `ip = not-an-ip` on row 7 is refused
+  before any install starts. Columns must be names (`hostname`, `zfs_arc`), and integer or boolean keys
+  are re-typed after filling in (`zfs.arc-max = "{{ zfs_arc }}"` serves as a number).
+- Credentials can't use placeholders: the table is stored unencrypted. The table is configurator
+  metadata and never appears in the answer file.
+
 #### Importing and editing as TOML
 
 - **import** (sidebar) creates a new answer from an existing `answer.toml`.
@@ -259,7 +310,7 @@ Either way, the file is parsed with a real TOML parser and mapped onto the edito
 - An imported answer that holds credentials is switched to `armed` and still needs the acknowledgement
   on the Serving tab before it saves.
 
-Filters (`must_contain` / `must_not_contain`) are configurator metadata, not part of the file, and are
+Filters (`match`, `match_mode`, `must_contain`, `must_not_contain`) and the machine table are configurator metadata, not part of the file, and are
 left as they are.
 
 #### Answer file coverage
@@ -559,6 +610,8 @@ src/
   api.ts       Access-gated JSON API for the UI
   access.ts    Cloudflare Access JWT verification (JWKS, iss/aud/exp)
   answers.ts   storage, inheritance, filter matching, masking
+  match.ts     field paths and globs over the installer's system information
+  fleet.ts     machine tables and {{ placeholder }} rendering
   guards.ts    serve decisions: mode, arm window, CIDR, token, HTTPS; atomic serve claim
   crypto.ts    AES-256-GCM envelope encryption, HMAC, token compare
   relay.ts     outbound webhook relay, templating, delivery log

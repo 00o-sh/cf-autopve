@@ -843,6 +843,134 @@ test("inline delivery stops, and says so, when the next attempt would not fit th
   assert.match(log[2].error, /stopped after 2/);
 });
 
+/* ------------------------- structured match rules ---------------------- */
+
+const SYSINFO = {
+  product: { fullname: "Proxmox VE", product: "pve" },
+  dmi: { system: { serial: "900030XXXX", name: "RS700-E11 Server", uuid: "6fb36fd4-77a1" }, chassis: { serial: "I02308XXXX" } },
+  network_interfaces: [{ link: "enp6s18", mac: "00:10:20:30:40:50" }, { link: "enp6s19", mac: "24:8A:07:1E:05:BC" }],
+};
+const RAW = JSON.stringify(SYSINFO);
+
+test("field paths reach nested values and every element of a list", () => {
+  assert.deepEqual(A.fieldValues(SYSINFO, "dmi.system.serial"), ["900030XXXX"]);
+  assert.deepEqual(A.fieldValues(SYSINFO, "network_interfaces[].mac"), ["00:10:20:30:40:50", "24:8A:07:1E:05:BC"]);
+  assert.deepEqual(A.fieldValues(SYSINFO, "dmi.baseboard.serial"), [], "missing fields have no values");
+  assert.deepEqual(A.fieldValues(SYSINFO, "network_interfaces.mac"), [], "a list needs [] to be entered");
+});
+
+test("globs follow the installer's filter syntax and ignore case", () => {
+  const t = (p, v) => A.globToRegExp(p).test(v);
+  assert.equal(t("24:8a:07:*", "24:8A:07:1E:05:BC"), true);
+  assert.equal(t("node-??", "node-01"), true);
+  assert.equal(t("node-[0-4]?", "node-12"), true);
+  assert.equal(t("node-[!0-4]?", "node-12"), false);
+  assert.equal(t("a.b", "axb"), false, "dots are literal");
+  assert.equal(t("9000*", "x900030"), false, "anchored");
+});
+
+test("match rules: all (default) and any", () => {
+  const rules = [{ field: "network_interfaces[].mac", pattern: "24:8a:07:1e:05:bc" }, { field: "dmi.system.serial", pattern: "9000*" }];
+  assert.equal(A.matches({ match: rules }, RAW), true);
+  assert.equal(A.matches({ match: [...rules, { field: "dmi.system.serial", pattern: "1234*" }] }, RAW), false);
+  assert.equal(A.matches({ match: [...rules, { field: "dmi.system.serial", pattern: "1234*" }], match_mode: "any" }, RAW), true);
+  assert.equal(A.matches({ match: [{ field: "dmi.baseboard.serial", pattern: "*" }] }, RAW), false, "an absent field never matches");
+});
+
+test("text filters keep their meaning, alone and alongside rules", () => {
+  assert.equal(A.matches({ must_contain: ["RS700"] }, RAW), true);
+  assert.equal(A.matches({ must_contain: [] }, RAW), false, "no filters at all never matches");
+  const rule = [{ field: "dmi.system.serial", pattern: "9000*" }];
+  assert.equal(A.matches({ match: rule, must_not_contain: ["RS700"] }, RAW), false, "must_not_contain still vetoes");
+  assert.equal(A.matches({ match: rule, must_contain: ["nope"] }, RAW), false, "set text filters must agree");
+  assert.equal(A.matches({ match: rule, must_contain: ["RS700"] }, RAW), true);
+});
+
+test("the dry run explains each rule with the values it saw", () => {
+  const r = A.evaluateRules(SYSINFO, [{ field: "network_interfaces[].mac", pattern: "00:10:*" }, { field: "dmi.system.sku", pattern: "*" }]);
+  assert.deepEqual(r.map((x) => [x.hit, x.values]), [[true, ["00:10:20:30:40:50", "24:8A:07:1E:05:BC"]], [false, []]]);
+});
+
+test("rules are validated and normalised on save", () => {
+  const out = A.normaliseDoc({ match: [{ field: " dmi.system.serial ", pattern: " 9000* " }, { field: "", pattern: "" }], match_mode: "weird" });
+  assert.deepEqual(out.match, [{ field: "dmi.system.serial", pattern: "9000*" }], "trimmed; empty rows dropped");
+  assert.equal(out.match_mode, "all");
+  assert.throws(() => A.normaliseDoc({ match: [{ field: "dmi..serial", pattern: "x" }] }), /not a field path/);
+  assert.throws(() => A.normaliseDoc({ match: [{ field: "dmi.system.serial", pattern: "" }] }), /needs a pattern/);
+  assert.ok(!A.emitToml(out).includes("9000"), "rules never reach the answer file");
+});
+
+/* ---------------------------- machine tables --------------------------- */
+
+const FLEET = {
+  field: "network_interfaces[].mac",
+  columns: ["mac", "hostname", "ip", "zfs_arc"],
+  rows: [["00:10:20:30:40:5?", "pve1", "10.0.0.11/24", "4096"], ["aa:bb:*", "pve2", "10.0.0.12/24", "2048"]],
+};
+
+test("a machine is found by globbing the key column against every value at the field", () => {
+  const m = A.findMachine(FLEET, SYSINFO);
+  assert.deepEqual(m, { row: 1, key: "00:10:20:30:40:5?", vars: { mac: "00:10:20:30:40:5?", hostname: "pve1", ip: "10.0.0.11/24", zfs_arc: "4096" } });
+  assert.equal(A.findMachine(FLEET, { network_interfaces: [{ mac: "ff:ff:ff:ff:ff:ff" }] }), null);
+  assert.equal(A.findMachine({ ...FLEET, field: "dmi.system.serial" }, SYSINFO), null);
+});
+
+test("placeholders fill from the row, re-typed and checked like any value", () => {
+  const doc = { global: { fqdn: "{{ hostname }}.lab.example" }, network: { cidr: "{{ip}}" }, "disk-setup": { "zfs.arc-max": "{{ zfs_arc }}", "disk-list": ["sda", "{{ hostname }}-boot"] } };
+  const m = A.findMachine(FLEET, SYSINFO);
+  const { doc: out, problems } = A.renderFleet(doc, m);
+  assert.deepEqual(problems, []);
+  assert.equal(out.global.fqdn, "pve1.lab.example");
+  assert.equal(out.network.cidr, "10.0.0.11/24");
+  assert.deepEqual(out["disk-setup"]["disk-list"], ["sda", "pve1-boot"], "lists are filled element by element");
+  assert.equal(out["disk-setup"]["zfs.arc-max"], 4096, "an int key becomes a number again");
+  assert.equal(doc.global.fqdn, "{{ hostname }}.lab.example", "the stored document is untouched");
+
+  assert.match(A.renderFleet(doc, null).problems[0], /no machine table row matches/);
+  const bad = A.renderFleet({ network: { cidr: "{{ hostname }}" } }, m).problems;
+  assert.match(bad[0], /network.cidr must be an address with prefix length.*row 1/);
+});
+
+test("a table routes: an answer with rows claims only machines that have one", () => {
+  assert.equal(A.matches({ fleet: FLEET }, RAW), true, "no other filters needed");
+  assert.equal(A.matches({ fleet: { ...FLEET, rows: [["ff:*", "x", "y", "1"]] } }, RAW), false);
+  assert.equal(A.matches({ fleet: FLEET, must_not_contain: ["RS700"] }, RAW), false);
+  assert.equal(A.matches({ fleet: FLEET, match: [{ field: "dmi.system.serial", pattern: "1234*" }] }, RAW), false, "rules must also hold");
+  assert.equal(A.matches({ fleet: { ...FLEET, rows: [] }, must_contain: ["RS700"] }, RAW), true, "an empty table changes nothing");
+});
+
+test("tables and placeholders are validated on save", () => {
+  const ok = A.normaliseDoc({ global: { fqdn: "{{ hostname }}.lab.example" }, fleet: { ...FLEET, rows: [...FLEET.rows, ["", "", "", ""]] } });
+  assert.equal(ok.fleet.rows.length, 2, "blank rows dropped");
+  assert.equal(ok.global.fqdn, "{{ hostname }}.lab.example", "a placeholder is not format-checked as written");
+  assert.throws(() => A.normaliseDoc({ global: { fqdn: "{{ hostnme }}.x.y" }, fleet: FLEET }), /no such column/);
+  assert.throws(() => A.normaliseDoc({ network: { cidr: "{{ hostname }}" }, fleet: FLEET }), /row 1 \(00:10:20:30:40:5\?\) gives "pve1"/);
+  assert.throws(() => A.normaliseDoc({ global: { "root-password": "{{ hostname }}" }, fleet: FLEET }), /cannot use placeholders/);
+  assert.throws(() => A.normaliseDoc({ fleet: { ...FLEET, columns: ["mac", "host-name"] } }), /letters, digits and underscores/);
+  assert.throws(() => A.normaliseDoc({ fleet: { ...FLEET, field: "nope..x" } }), /not a field path/);
+  assert.throws(() => A.normaliseDoc({ fleet: { ...FLEET, rows: [["", "pve1"]] } }), /has no mac/);
+  assert.ok(!A.emitToml(ok).includes("pve2"), "the table never reaches the answer file");
+});
+
+test("selection fills Default's placeholders from the winning answer's table", async () => {
+  const row = (name, doc, priority) => ({ name, doc: JSON.stringify(doc), priority, serve_mode: "always", armed_until: null, serves_remaining: null,
+    allow_cidrs: "[]", secrets_ack: 0, has_secrets: 0, notes: "", created_at: 0, updated_at: 0, updated_by: "" });
+  const rows = [
+    row("rack", { network: { source: "from-answer", cidr: "{{ ip }}" }, fleet: FLEET }, 10),
+    row("Default", { global: { fqdn: "{{ hostname }}.lab.example" }, network: { source: "from-dhcp" } }, 1000),
+  ];
+  const env = { DB: { prepare: () => ({ all: async () => ({ results: rows }) }) } };
+  const hit = await A.selectAnswer(env, RAW);
+  assert.equal(hit.record.name, "rack");
+  assert.deepEqual(hit.templateProblems, []);
+  assert.equal(hit.merged.global.fqdn, "pve1.lab.example");
+  assert.equal(hit.merged.network.cidr, "10.0.0.11/24");
+  assert.equal(hit.machine.row, 1);
+  const miss = await A.selectAnswer(env, JSON.stringify({ network_interfaces: [{ mac: "ff:ff:ff:ff:ff:ff" }] }));
+  assert.equal(miss.record.name, "Default");
+  assert.match(miss.templateProblems[0], /global.fqdn uses \{\{ hostname \}\} but no machine table row/, "never served half-rendered");
+});
+
 /* ------------------------------- relay ------------------------------- */
 
 test("relay templates resolve nested paths and escape strings", () => {

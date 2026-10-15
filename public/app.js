@@ -397,6 +397,8 @@ function formatHint(format) { return S.boot.schema.formats?.[format]?.hint || ""
 function checkField(sectionId, key, value) {
   const def = S.boot.schema.sections.find((s) => s.id === sectionId)?.keys[key];
   if (!def || def.type === "list" || value === MASK || value === "" || value == null) return null;
+  // Placeholders are checked per machine on save, once the table fills them in.
+  if (/\{\{[^{}]*\}\}/.test(String(value))) return null;
   const text = String(value).trim();
   if (def.type === "bool") return /^(true|false|yes|no|1|0)$/i.test(text) ? null : "must be true or false";
   if (def.type === "int") { const n = Number(text); return text !== "" && Number.isFinite(n) && n >= 0 ? null : "must be a non-negative number"; }
@@ -550,6 +552,134 @@ function commentField(scope, key, { alwaysShow = false, placeholder } = {}) {
 
 /* ------------------------------- filters ----------------------------- */
 
+/** Structured rules: one field of the system information against a glob. */
+function renderMatchRules() {
+  const doc = S.answer.doc;
+  const rules = (doc.match = doc.match || []);
+  const card = el("div", { class: "card", style: "grid-column: 1 / -1" }, [
+    el("h3", { text: "Match rules" }),
+    el("p", { class: "muted", style: "margin-top:0", text:
+      "Each rule tests one field of what the installer reports. Globs work like Proxmox filters (* ? [abc] [!a]) and ignore case. " +
+      "Use [] for lists: network_interfaces[].mac matches if any NIC does." }),
+  ]);
+  const mode = el("select", { "aria-label": "match mode" }, [
+    el("option", { value: "all", text: "all rules must match", ...(doc.match_mode !== "any" ? { selected: true } : {}) }),
+    el("option", { value: "any", text: "any rule may match", ...(doc.match_mode === "any" ? { selected: true } : {}) }),
+  ]);
+  mode.addEventListener("change", () => { doc.match_mode = mode.value; markDirty(); });
+  card.append(el("label", { class: "field" }, [el("span", { text: "When several rules are set" }), mode]));
+
+  const fields = el("datalist", { id: "match-fields" });
+  for (const f of S.boot.schema.match_fields || []) fields.append(el("option", { value: f }));
+  card.append(fields);
+  for (const [i, rule] of rules.entries()) {
+    card.append(el("div", { class: "matchrow" }, [
+      el("input", { list: "match-fields", value: rule.field, placeholder: "network_interfaces[].mac", "aria-label": "field",
+        oninput: (e) => { rule.field = e.target.value; markDirty(); } }),
+      el("input", { value: rule.pattern, placeholder: "24:8a:07:1e:05:bc", "aria-label": "pattern", class: "mono",
+        oninput: (e) => { rule.pattern = e.target.value; markDirty(); } }),
+      el("button", { text: "−", title: "remove rule", onclick: () => { rules.splice(i, 1); markDirty(); renderAnswer(); } }),
+    ]));
+  }
+  card.append(el("button", { text: "Add rule", onclick: () => { rules.push({ field: "", pattern: "" }); markDirty(); renderAnswer(); } }));
+  return card;
+}
+
+/* ---------------------------- machine table -------------------------- */
+
+/** RFC 4180-ish: quoted cells, doubled quotes, CRLF. Tab or ; delimited works too. */
+function parseCsv(text) {
+  const first = text.split(/\r?\n/, 1)[0] || "";
+  const delim = first.includes("\t") ? "\t" : first.includes(";") && !first.includes(",") ? ";" : ",";
+  const rows = [];
+  let row = [], cell = "", quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else cell += c;
+    } else if (c === '"' && cell === "") quoted = true;
+    else if (c === delim) { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(cell); rows.push(row); row = []; cell = "";
+    } else cell += c;
+  }
+  if (quoted) throw new Error("a quoted cell is never closed");
+  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+  return rows.map((r) => r.map((c) => c.trim())).filter((r) => r.some((c) => c !== ""));
+}
+
+function toCsv(fleet) {
+  if (!fleet?.columns?.length) return "";
+  const q = (c) => (/[",\n\r]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c);
+  return [fleet.columns, ...fleet.rows].map((r) => r.map(q).join(",")).join("\n");
+}
+
+/** Every {{ name }} used in the open answer's sections. */
+function placeholdersUsed(doc) {
+  const names = new Set();
+  const scan = (v) => { if (typeof v === "string") for (const m of v.matchAll(/\{\{\s*([^{}]*?)\s*\}\}/g)) names.add(m[1]); };
+  for (const section of S.boot.schema.sections) {
+    for (const v of Object.values(doc[section.id] || {})) Array.isArray(v) ? v.forEach(scan) : scan(v);
+  }
+  return [...names];
+}
+
+function renderMachineTable() {
+  const doc = S.answer.doc;
+  const card = el("div", { class: "card", style: "grid-column: 1 / -1" }, [
+    el("h3", { text: "Machine table" }),
+    el("p", { class: "muted", style: "margin-top:0", text:
+      "One row per machine, first column is the key. Values in this answer can then use {{ column }}, e.g. " +
+      "fqdn = {{ hostname }}.lab.example or cidr = {{ ip }}, filled in from the machine's row when it is served. " +
+      "With rows here, this answer only claims machines that have one." }),
+  ]);
+  const field = el("input", { list: "match-fields", value: doc.fleet?.field || "network_interfaces[].mac", "aria-label": "key field", class: "mono" });
+  const ta = el("textarea", { class: "mono", rows: 6, placeholder: "mac,hostname,ip\n24:8a:07:1e:05:bc,pve1,10.0.0.11/24\n24:8a:07:1e:05:bd,pve2,10.0.0.12/24" });
+  ta.value = toCsv(doc.fleet);
+  const status = el("p", { class: "muted" });
+  const update = () => {
+    const used = placeholdersUsed(doc);
+    const usedText = used.length ? ` Placeholders in this answer: ${used.map((n) => `{{ ${n} }}`).join(", ")}.` : "";
+    let rows;
+    try { rows = parseCsv(ta.value); } catch (e) { status.textContent = "Not valid CSV: " + e.message; status.className = "bad"; return; }
+    if (!rows.length) {
+      delete doc.fleet;
+      status.textContent = "No table." + usedText; status.className = "muted";
+      return;
+    }
+    const [columns, ...body] = rows;
+    doc.fleet = { field: field.value.trim(), columns, rows: body };
+    const missing = used.filter((n) => !columns.includes(n));
+    status.textContent = `${body.length} machine${body.length === 1 ? "" : "s"}, keyed on ${field.value.trim()} by ${columns[0]}; columns: ${columns.join(", ")}.` + usedText +
+      (missing.length ? ` No column for: ${missing.join(", ")}.` : "");
+    status.className = missing.length ? "bad" : "muted";
+  };
+  const changed = () => { update(); markDirty(); };
+  field.addEventListener("input", changed);
+  ta.addEventListener("input", changed);
+  const file = el("input", { type: "file", accept: ".csv,.tsv,.txt,text/csv", style: "display:none" });
+  file.addEventListener("change", async () => {
+    const f = file.files?.[0];
+    if (!f) return;
+    ta.value = await f.text(); file.value = ""; changed();
+  });
+  card.append(
+    el("label", { class: "field" }, [el("span", { text: "Key field (compared with the first column, globs allowed)" }), field]),
+    ta,
+    el("div", { style: "margin-top:8px; display:flex; gap:8px" }, [
+      el("button", { text: "Load CSV…", onclick: () => file.click() }),
+      el("button", { text: "Clear table", onclick: () => { ta.value = ""; changed(); } }),
+      file,
+    ]),
+    status,
+  );
+  update();
+  return card;
+}
+
 function renderFilters() {
   const wrap = el("div", { class: "split" });
   const mk = (field, title, note) => {
@@ -577,8 +707,10 @@ function renderFilters() {
     }
     return card;
   };
-  wrap.append(mk("must_contain", "Must contain", "The system information must contain at least one of these strings for this answer to be used."));
-  wrap.append(mk("must_not_contain", "Must not contain", "If any of these strings is present, this answer is skipped."));
+  wrap.append(renderMatchRules());
+  wrap.append(renderMachineTable());
+  wrap.append(mk("must_contain", "Text filter: must contain", "Legacy text search over the raw system information: at least one of these strings must appear. Prefer match rules above: a substring can match more than you meant."));
+  wrap.append(mk("must_not_contain", "Text filter: must not contain", "If any of these strings appears anywhere in the system information, this answer is skipped."));
   const tester = el("div", { class: "card" }, [
     el("h3", { text: "Dry run" }),
     el("p", { class: "muted", text: "Paste a system_info payload (copy one from History) to see which answer would win." }),
@@ -592,7 +724,13 @@ function renderFilters() {
       try { parsed = JSON.parse(ta.value || "{}"); } catch { return toast("That is not valid JSON.", "bad"); }
       const r = await api("/match", { method: "POST", body: { system_info: parsed } });
       const issues = r.problems?.length ? `\ninstaller would reject it:\n${r.problems.map((p) => "  - " + p).join("\n")}\n` : "";
-      out.textContent = `matched: ${r.matched}\nwould serve: ${r.would_serve}${r.reason ? " — " + r.reason : ""}\n${issues}\n${r.toml || ""}`;
+      const rules = r.rules?.length
+        ? `\nmatch rules (${r.match_mode}):\n${r.rules.map((x) => `  ${x.hit ? "✓" : "✗"} ${x.field} ~ ${x.pattern}   [${x.values.join(", ") || "no value"}]`).join("\n")}\n`
+        : "";
+      const machine = r.machine
+        ? `\nmachine table row ${r.machine.row} (${r.machine.key}): ${Object.entries(r.machine.vars).map(([k, v]) => `${k}=${v}`).join(", ")}\n`
+        : "";
+      out.textContent = `matched: ${r.matched}\nwould serve: ${r.would_serve}${r.reason ? " — " + r.reason : ""}\n${rules}${machine}${issues}\n${r.toml || ""}`;
     },
   })]), out);
   const col = el("div", { style: "grid-column: 1 / -1" }, [tester]);
@@ -718,7 +856,8 @@ function applyParsedDoc(parsed) {
   const old = S.answer.doc;
   const comments = { ...(parsed.comments || {}) };
   for (const scope of ["must_contain", "must_not_contain"]) if (old.comments?.[scope]) comments[scope] = old.comments[scope];
-  S.answer.doc = { ...parsed, must_contain: old.must_contain || [], must_not_contain: old.must_not_contain || [], comments };
+  S.answer.doc = { ...parsed, must_contain: old.must_contain || [], must_not_contain: old.must_not_contain || [],
+    match: old.match || [], match_mode: old.match_mode || "all", ...(old.fleet ? { fleet: old.fleet } : {}), comments };
   markDirty();
   const notes = [];
   if (docHoldsSecrets(S.answer.doc)) {
