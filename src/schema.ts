@@ -79,8 +79,9 @@ const GLOBAL: Record<string, KeyDef> = {
   },
   "root-password-hashed": {
     description:
-      "The pre-hashed password for the root user, which will be written verbatim to /etc/passwd. May be used instead of root-password and can be generated using the mkpasswd tool, for example. Still a credential: offline-crackable, so it is treated as a secret.",
+      "The pre-hashed password for the root user, written verbatim to /etc/shadow. Use instead of root-password: the Hash it button makes one in your browser, or run mkpasswd -m sha-512. Still a credential (offline-crackable), so it is treated as a secret.",
     type: "str",
+    format: "crypt",
     secret: true,
   },
   "root-ssh-keys": {
