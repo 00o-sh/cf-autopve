@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>autopve — Proxmox answer configurator</title>
+<title>autopve: Proxmox answer configurator</title>
 <link rel="stylesheet" href="/style.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230e1210'/%3E%3Cpath d='M8 23 L16 7 L24 23 Z' fill='none' stroke='%23e97451' stroke-width='2.5'/%3E%3C/svg%3E">
 </head>
@@ -20,24 +20,24 @@
     <section>
       <h2>Answers</h2>
       <div class="rowbtns">
-        <button id="answer-add" title="New answer">+</button>
+        <button id="answer-add" title="New answer" aria-label="New answer">+</button>
         <button id="answer-import" title="Create an answer from an existing answer.toml">import</button>
         <input type="file" id="answer-import-input" accept=".toml,text/plain,application/toml" hidden>
         <button id="answer-copy" title="Copy selected answer">copy</button>
         <button id="answer-rename" title="Rename selected answer">rename</button>
-        <button id="answer-delete" class="danger" title="Delete selected answer">del</button>
+        <button id="answer-delete" class="danger" title="Delete selected answer">delete</button>
       </div>
       <ul id="answer-list" class="list"></ul>
     </section>
     <section>
       <h2>Installs</h2>
-      <ul class="list"><li id="installs-open"><span>dashboard</span><span id="installs-count" class="muted"></span></li></ul>
+      <ul class="list"><li id="installs-open" tabindex="0" role="button"><span>dashboard</span><span id="installs-count" class="muted"></span></li></ul>
     </section>
     <section>
       <h2>Relays</h2>
       <div class="rowbtns">
-        <button id="relay-add" title="New relay">+</button>
-        <button id="relay-delete" class="danger" title="Delete selected relay">del</button>
+        <button id="relay-add" title="New relay" aria-label="New relay">+</button>
+        <button id="relay-delete" class="danger" title="Delete selected relay">delete</button>
       </div>
       <ul id="relay-list" class="list"></ul>
     </section>
@@ -56,7 +56,7 @@
       <h1>Build a Proxmox answer file</h1>
       <p>Pick an answer on the left, or create one. Everything you build here can be
          <strong>downloaded as <code>answer.toml</code></strong> and baked into an ISO with
-         <code>proxmox-auto-install-assistant</code> — hosting it from this Worker is optional.</p>
+         <code>proxmox-auto-install-assistant</code>. Hosting it from this Worker is optional.</p>
       <p class="muted">Hosting an answer that contains a root password means anything that can reach the
          answer endpoint while it is armed can read that password. The Serving tab is where you decide
          whether, when, and to whom that happens.</p>
@@ -108,7 +108,7 @@
   <form method="dialog">
     <h3 id="prompt-title"></h3>
     <p id="prompt-text" class="muted"></p>
-    <input id="prompt-input" autocomplete="off">
+    <input id="prompt-input" autocomplete="off" aria-labelledby="prompt-title">
     <menu>
       <button value="cancel">Cancel</button>
       <button value="ok" class="primary" id="prompt-ok">OK</button>
