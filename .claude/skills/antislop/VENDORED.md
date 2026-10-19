@@ -5,7 +5,10 @@
 - License: MIT, see `LICENSE` in this directory. It covers all six antislop skill folders.
 - Skills: `antislop` (core), `antislop-code`, `antislop-ui`, `antislop-copywriting`,
   `antislop-layoutmobile`, `antislop-human`.
-- Local changes: none. This file and `LICENSE` were added alongside the upstream files.
+- Local changes: `antislop-human/SKILL.md` drops `Bash(python *) Bash(python3 *)` from its
+  `allowed-tools`. Upstream pre-approves any Python command; here running `contrast-check.py` asks for
+  permission like any other command. Re-apply this on every update. This file and `LICENSE` were
+  added alongside the upstream files.
 
 Claude Code loads these from `.claude/skills/` by their descriptions, so the core's first-run wizard
 and its `CLAUDE.md` pointer block are not needed here. The core asks once per session whether to apply
