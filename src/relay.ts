@@ -222,6 +222,17 @@ async function buildRequest(env: Env, relay: RelayRecord, payload: unknown, rawB
   return { headers, body };
 }
 
+/**
+ * What a failed fetch is shown as (relay log, test button). A fixed sentence
+ * per kind of failure, never the error itself: the full error goes to the logs.
+ */
+export function fetchFailure(err: unknown, timeoutMs: number): string {
+  const name = err instanceof Error ? err.name : "";
+  if (name === "TimeoutError" || name === "AbortError") return `no response within ${timeoutMs} ms`;
+  if (name === "TypeError") return "could not connect (DNS, TLS or connection refused)";
+  return "request failed; the details are in the Worker logs";
+}
+
 /** One attempt, logged. The signature is recomputed per attempt so its timestamp stays fresh. */
 export async function deliverOnce(
   env: Env, relay: RelayRecord, payload: unknown, rawBody: string, historyId: number | null, attempt: number,
@@ -233,7 +244,8 @@ export async function deliverOnce(
     const text = (await res.text()).slice(0, 2048);
     result = { ok: res.ok, status: res.status, error: res.ok ? "" : `HTTP ${res.status}`, response: text, attempts: attempt };
   } catch (err) {
-    result = { ok: false, status: null, error: String((err as Error)?.message || err), response: "", attempts: attempt };
+    console.error(`relay ${relay.name} delivery failed:`, err);
+    result = { ok: false, status: null, error: fetchFailure(err, relay.timeout_ms), response: "", attempts: attempt };
   }
   await logDelivery(env, relay.name, historyId, result);
   return result;

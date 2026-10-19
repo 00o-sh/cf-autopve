@@ -21,3 +21,4 @@ export { trimTrailing } from "../src/env";
 export { AccessError } from "../src/access";
 export { ValidationError } from "../src/answers";
 export { FileError } from "../src/files";
+export { fetchFailure } from "../src/relay";
