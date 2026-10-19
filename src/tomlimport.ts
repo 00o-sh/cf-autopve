@@ -131,8 +131,11 @@ export function parseAnswerToml(text: string): ImportResult {
   try {
     tree = parse(text) as Record<string, unknown>;
   } catch (err) {
-    const msg = err instanceof TomlError ? err.message.split("\n")[0] : String((err as Error)?.message ?? err);
-    throw new ValidationError(`Not valid TOML: ${msg}`);
+    if (!(err instanceof TomlError)) {
+      console.error("TOML parser failed:", err);
+      throw new ValidationError("Not valid TOML.");
+    }
+    throw new ValidationError(`Not valid TOML: ${err.message.split("\n")[0]}`);
   }
 
   const warnings: string[] = [];

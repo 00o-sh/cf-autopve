@@ -1129,3 +1129,13 @@ test("trimTrailing strips runs of a character in linear time", () => {
   assert.equal(A.trimTrailing(long, "/").length, 200_002);
   assert.ok(Date.now() - t < 200);
 });
+
+test("a failed relay fetch is described by kind, never by the error itself", () => {
+  const timeout = new Error("signal timed out"); timeout.name = "TimeoutError";
+  assert.equal(A.fetchFailure(timeout, 5000), "no response within 5000 ms");
+  assert.match(A.fetchFailure(new TypeError("internal detail at /x.js:1"), 5000), /^could not connect/);
+  for (const e of [new Error("secret internals"), "a string", { stack: "at foo" }]) {
+    const out = A.fetchFailure(e, 5000);
+    assert.ok(!/secret|string|foo/.test(out), out);
+  }
+});
