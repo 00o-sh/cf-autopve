@@ -83,9 +83,7 @@ function safeJson<T>(s: string, fallback: T): T {
   }
 }
 
-/* ------------------------------------------------------------------ *
- * Secret handling
- * ------------------------------------------------------------------ */
+// Secret handling
 
 export function secretKeysIn(doc: AnswerDoc): string[] {
   const found: string[] = [];
@@ -104,7 +102,7 @@ export function docHasSecrets(doc: AnswerDoc): boolean {
   return secretKeysIn(doc).length > 0;
 }
 
-/** Encrypt every credential value in place (returns a new document). */
+/** Encrypt every credential value (returns a new document). */
 export async function encryptDoc(doc: AnswerDoc, env: Env): Promise<AnswerDoc> {
   const out: AnswerDoc = JSON.parse(JSON.stringify(doc));
   for (const section of SECTION_ORDER) {
@@ -179,9 +177,7 @@ export function unmaskDoc(incoming: AnswerDoc, stored: AnswerDoc): AnswerDoc {
   return out;
 }
 
-/* ------------------------------------------------------------------ *
- * Validation
- * ------------------------------------------------------------------ */
+// Validation
 
 export const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}$/;
 
@@ -324,9 +320,7 @@ function normaliseComments(raw: unknown, doc: AnswerDoc): Record<string, Record<
   return out;
 }
 
-/* ------------------------------------------------------------------ *
- * Storage
- * ------------------------------------------------------------------ */
+// Storage
 
 const COLUMNS =
   "name, doc, priority, serve_mode, armed_until, serves_remaining, allow_cidrs, secrets_ack, has_secrets, notes, created_at, updated_at, updated_by";
@@ -425,11 +419,7 @@ export async function ensureDefaultAnswer(env: Env): Promise<void> {
     .run();
 }
 
-/* ------------------------------------------------------------------ *
- * Matching and inheritance
- * ------------------------------------------------------------------ */
-
-/* ------------------------- structured match rules ------------------------ */
+// Matching and inheritance
 
 /**
  * A rule tests one field of the installer's system information against a
@@ -539,9 +529,7 @@ export function mergeDocs(defaultDoc: AnswerDoc, answerDoc: AnswerDoc): AnswerDo
   return out;
 }
 
-/* ------------------------------------------------------------------ *
- * Checking what the installer will actually receive
- * ------------------------------------------------------------------ */
+// Checking what the installer will actually receive
 
 const present = (v: unknown) => v !== undefined && v !== null && v !== "";
 

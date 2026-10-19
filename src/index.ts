@@ -1,9 +1,9 @@
 /**
- * cf-autopve — Proxmox VE automated-installation answer configurator, on Workers.
+ * cf-autopve: Proxmox VE automated-installation answer configurator, on Workers.
  *
  *   /                 configurator UI            (Cloudflare Access required)
  *   /api/*            configurator API           (Cloudflare Access required)
- *   POST /answer      installer answer endpoint  (unauthenticated by nature — see guards.ts)
+ *   POST /answer      installer answer endpoint  (unauthenticated by nature, see guards.ts)
  *   POST /hook/<name> post-installation webhook -> outbound relay (needs SERVE_TOKEN)
  *   POST /hook        post-installation webhook, install tracking only (needs SERVE_TOKEN)
  *   GET  /files/<n>   first-boot scripts and other hosted files
@@ -48,10 +48,6 @@ export default {
   },
 };
 
-/* ------------------------------------------------------------------ *
- * Configurator UI (static assets, gated on Access)
- * ------------------------------------------------------------------ */
-
 async function handleUi(request: Request, env: Env): Promise<Response> {
   try {
     await requireIdentity(request, env);
@@ -76,10 +72,6 @@ async function handleUi(request: Request, env: Env): Promise<Response> {
   );
   return new Response(res.body, { status: res.status, headers });
 }
-
-/* ------------------------------------------------------------------ *
- * POST /answer — what the Proxmox installer talks to
- * ------------------------------------------------------------------ */
 
 async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, path: string): Promise<Response> {
   if (request.method !== "POST") {
@@ -175,10 +167,6 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
   });
 }
 
-/* ------------------------------------------------------------------ *
- * POST /hook/<relay> — post-installation webhook relay
- * ------------------------------------------------------------------ */
-
 async function handleHook(request: Request, env: Env, ctx: ExecutionContext, path: string): Promise<Response> {
   if (request.method !== "POST") return new Response("POST only\n", { status: 405, headers: { ...TEXT, Allow: "POST" } });
   const segments = path.slice("/hook".length).split("/").filter(Boolean).map(decodeURIComponent);
@@ -262,10 +250,6 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
   // The installer only needs to know we took the payload; delivery is async.
   return new Response("accepted\n", { status: 202, headers: TEXT });
 }
-
-/* ------------------------------------------------------------------ *
- * GET /files/<name>
- * ------------------------------------------------------------------ */
 
 async function handleFile(request: Request, env: Env, path: string): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") {

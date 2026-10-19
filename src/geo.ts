@@ -1,7 +1,8 @@
 /**
  * Country codes (ISO 3166-1 alpha-2, lower case) and time zones accepted in the
- * global section. Codes from tzdata 2026c iso3166.tab (English CLDR names), zones from zone.tab plus UTC —
- * the same tables the Proxmox installer's locale data is built from.
+ * global section. Codes from tzdata 2026c iso3166.tab (English CLDR names),
+ * zones from zone.tab plus UTC: the same tables the Proxmox installer's locale
+ * data is built from.
  */
 
 export const COUNTRIES: Record<string, string> = {

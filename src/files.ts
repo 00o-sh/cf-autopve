@@ -3,8 +3,8 @@
  *
  * Small files live in D1 (2 MB is the hard per-row limit, FILE_MAX_BYTES keeps
  * it well under that); bigger ones need the optional R2 binding. Whatever is
- * here is downloadable by anything that can reach the URL — the installer has
- * no credential — so uploads are scanned for credential-looking content and
+ * here is downloadable by anything that can reach the URL (the installer has
+ * no credential), so uploads are scanned for credential-looking content and
  * flagged loudly in the UI.
  */
 

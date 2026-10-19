@@ -97,7 +97,6 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
   const method = request.method.toUpperCase();
   const head = parts[0] ?? "";
 
-  /* ----------------------------- bootstrap ----------------------------- */
   if (head === "bootstrap" && method === "GET") {
     await ensureDefaultAnswer(env);
     const [answers, relays, files] = await Promise.all([listAnswers(env), listRelays(env), listFiles(env)]);
@@ -121,7 +120,6 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     });
   }
 
-  /* ------------------------------ answers ------------------------------ */
   if (head === "answers") {
     const name = parts[1];
     const action = parts[2];
@@ -258,7 +256,6 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     return json({ error: "method not allowed" }, 405);
   }
 
-  /* -------------------------------- toml ------------------------------- */
   // Pure conversions for the raw editor and file import; nothing is stored.
   // Saving still goes through PUT /answers/<name> and all of its checks.
   if (head === "toml" && parts[1] === "parse" && method === "POST") {
@@ -280,7 +277,6 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     return json({ toml: emitToml(shaped, { header }) });
   }
 
-  /* ------------------------------- match ------------------------------- */
   if (head === "match" && method === "POST") {
     // Dry run: which answer would serve this system_info, and would it be allowed?
     const body = (await request.json()) as { system_info: unknown };
@@ -305,7 +301,6 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     });
   }
 
-  /* ------------------------------ installs ----------------------------- */
   if (head === "installs") {
     const id = parts[1];
     if (!id && method === "GET") {
@@ -324,7 +319,6 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     return json({ error: "method not allowed" }, 405);
   }
 
-  /* ------------------------------ history ------------------------------ */
   if (head === "history") {
     if (method === "GET") {
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") ?? 100)));
@@ -359,7 +353,6 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     return json({ keys: (res.results ?? []).map((r) => r.k) });
   }
 
-  /* ------------------------------- relays ------------------------------ */
   if (head === "relays") {
     const name = parts[1];
     if (!name && method === "GET") return json({ relays: (await listRelays(env)).map((r) => ({ ...maskRelay(r), has_hmac: !!r.hmac_secret })) });
@@ -396,7 +389,6 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     return json({ log: res.results ?? [] });
   }
 
-  /* -------------------------------- files ------------------------------ */
   if (head === "files") {
     const name = parts[1];
     if (!name && method === "GET") return json({ files: await listFiles(env) });
@@ -417,7 +409,6 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     return json({ error: "method not allowed" }, 405);
   }
 
-  /* -------------------------------- audit ------------------------------ */
   if (head === "audit" && method === "GET") {
     const res = await env.DB.prepare("SELECT * FROM audit ORDER BY ts DESC LIMIT 200").all();
     return json({ audit: res.results ?? [] });
