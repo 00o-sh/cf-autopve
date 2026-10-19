@@ -1,5 +1,5 @@
 /**
- * Outbound webhook relay — the replacement for upstream's ansible-playbook
+ * Outbound webhook relay, the replacement for upstream's ansible-playbook
  * execution. A Worker has no shell and no long-lived process, so instead of
  * running a playbook here, the installer's post-installation payload is
  * forwarded (optionally reshaped and signed) to whatever does have a shell:
@@ -147,9 +147,7 @@ export async function deleteRelay(env: Env, name: string): Promise<void> {
   await env.DB.prepare("DELETE FROM relays WHERE name = ?").bind(name).run();
 }
 
-/* ------------------------------------------------------------------ *
- * Templating
- * ------------------------------------------------------------------ */
+// Templating
 
 function lookup(context: any, path: string): unknown {
   let cur = context;
@@ -297,9 +295,7 @@ async function logDelivery(env: Env, relay: string, historyId: number | null, re
   await env.DB.prepare("DELETE FROM relay_log WHERE id NOT IN (SELECT id FROM relay_log ORDER BY ts DESC LIMIT 500)").run();
 }
 
-/* ------------------------------------------------------------------ *
- * Queue consumer
- * ------------------------------------------------------------------ */
+// Queue consumer
 
 async function setHistoryOutcome(env: Env, id: number | null, outcome: string, detail: string): Promise<void> {
   if (id === null) return;

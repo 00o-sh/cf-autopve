@@ -1,5 +1,5 @@
 "use strict";
-/* autopve configurator — vanilla JS, no external dependencies (strict CSP). */
+/* autopve configurator: vanilla JS, no external dependencies (strict CSP). */
 
 const MASK = "__autopve_secret_set__";
 const $ = (sel) => document.querySelector(sel);
@@ -17,12 +17,17 @@ const el = (tag, props = {}, kids = []) => {
   return node;
 };
 
+/** Enter/Space handler for non-button elements that act on click. */
+const onActivate = (fn) => (e) => {
+  if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); fn(e); }
+};
+
 const S = {
   boot: null, answers: [], answer: null, relays: [], relay: null, files: [],
   sysinfoKeys: [], tab: "global", dirty: false, history: [], live: false, timer: null,
 };
 
-/* ----------------------------- transport ----------------------------- */
+// Transport
 
 async function api(path, opts = {}) {
   const method = opts.method || "GET";
@@ -76,7 +81,7 @@ function ask(title, text, value = "", okLabel = "OK", { secret = false } = {}) {
   });
 }
 
-/* ------------------------------ bootstrap ---------------------------- */
+// Bootstrap
 
 async function boot() {
   try {
@@ -106,7 +111,7 @@ function renderBanners() {
   }
   if (!c.encryption_configured) {
     box.append(el("div", { class: "banner warn", text:
-      "ANSWER_ENC_KEY is not set. Credential fields cannot be saved at all until it is — run: openssl rand -base64 32 | wrangler secret put ANSWER_ENC_KEY" }));
+      "ANSWER_ENC_KEY is not set. Credential fields cannot be saved at all until it is set. Run: openssl rand -base64 32 | wrangler secret put ANSWER_ENC_KEY" }));
   }
   if (!c.serve_token_configured) {
     box.append(el("div", { class: "banner info", text:
@@ -114,7 +119,9 @@ function renderBanners() {
   }
 }
 
-/* ------------------------------- sidebar ----------------------------- */
+// Sidebar
+
+const DOT_LABEL = { armed: "armed", off: "not armed", secret: "holds credentials, not armed" };
 
 function answerDot(a) {
   if (a.has_secrets && !a.armed) return "secret";
@@ -127,11 +134,11 @@ function renderSidebar() {
   for (const a of S.answers) {
     list.append(el("li", {
       class: S.answer && S.answer.name === a.name ? "active" : "",
-      onclick: () => openAnswer(a.name),
+      onclick: () => openAnswer(a.name), onkeydown: onActivate(() => openAnswer(a.name)), tabindex: "0", role: "button",
       title: a.has_secrets ? "holds credentials: " + a.secret_keys.join(", ") : "",
     }, [
       el("span", { text: a.name }),
-      el("span", { class: "dot " + answerDot(a) }),
+      el("span", { class: "dot " + answerDot(a), role: "img", "aria-label": DOT_LABEL[answerDot(a)], title: DOT_LABEL[answerDot(a)] }),
     ]));
   }
   const rlist = $("#relay-list");
@@ -139,15 +146,16 @@ function renderSidebar() {
   for (const r of S.relays) {
     rlist.append(el("li", {
       class: S.relay && S.relay.name === r.name ? "active" : "",
-      onclick: () => openRelay(r.name),
-    }, [el("span", { text: r.name }), el("span", { class: "dot " + (r.enabled ? "armed" : "off") })]));
+      onclick: () => openRelay(r.name), onkeydown: onActivate(() => openRelay(r.name)), tabindex: "0", role: "button",
+    }, [el("span", { text: r.name }), el("span", { class: "dot " + (r.enabled ? "armed" : "off"), role: "img",
+      "aria-label": r.enabled ? "enabled" : "disabled", title: r.enabled ? "enabled" : "disabled" })]));
   }
   const flist = $("#file-list");
   flist.innerHTML = "";
   for (const f of S.files) {
-    flist.append(el("li", { onclick: () => openFiles(), text: f.name }));
+    flist.append(el("li", { onclick: () => openFiles(), onkeydown: onActivate(openFiles), tabindex: "0", role: "button", text: f.name }));
   }
-  if (S.files.length) flist.append(el("li", { class: "muted", text: "manage files…", onclick: () => openFiles() }));
+  if (S.files.length) flist.append(el("li", { class: "muted", text: "manage files…", onclick: () => openFiles(), onkeydown: onActivate(openFiles), tabindex: "0", role: "button" }));
 }
 
 function showPane(id) {
@@ -155,7 +163,7 @@ function showPane(id) {
   if (id !== "installs-pane" && S.installsTimer) { clearInterval(S.installsTimer); S.installsTimer = null; }
 }
 
-/* ------------------------------- answers ----------------------------- */
+// Answers
 
 async function openAnswer(name) {
   if (S.dirty && !confirm("Discard unsaved changes?")) return;
@@ -217,7 +225,7 @@ function sectionTable(id) {
   return S.answer.doc[id];
 }
 
-/* ----------------------- hashing the root password -------------------- */
+// Hashing the root password
 
 /** Ask for a new root password twice, without echoing it. */
 async function askNewPassword() {
@@ -259,6 +267,7 @@ function renderSection(section) {
   const input = el("input", {
     list: listId,
     placeholder: section.freeform ? "MAC address, e.g. aa:bb:cc:dd:ee:ff" : "pick a key, or type a new one",
+    "aria-label": section.freeform ? "MAC address to add" : "Key to add",
     onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } },
     oninput: () => { hint.textContent = section.keys[input.value]?.description || ""; },
   });
@@ -298,7 +307,7 @@ function renderSection(section) {
 
   const rows = el("div", { class: "card" });
   const entries = Object.entries(table);
-  if (!entries.length) rows.append(el("p", { class: "muted", text: "Nothing set in this section." }));
+  if (!entries.length) rows.append(el("p", { class: "muted", text: "Nothing set in this section. Add a key above." }));
   for (const [key, value] of entries) {
     const def = section.keys[key] || {};
     const isSecret = isSecretField(section.id, key);
@@ -318,8 +327,9 @@ function renderSection(section) {
     } else {
       const control = el("input", {
         value: stored ? "" : Array.isArray(value) ? "[" + value.join(", ") + "]" : String(value),
-        placeholder: stored ? "stored, encrypted — type to replace" : def.options ? def.options[0] : def.format ? formatHint(def.format) : "",
+        placeholder: stored ? "stored, encrypted; type to replace" : def.options ? def.options[0] : def.format ? formatHint(def.format) : "",
         type: isSecret && !stored ? "password" : "text",
+        "aria-label": key,
         list: def.options ? listId + "-" + key.replace(/\W/g, "-") : false,
         oninput: (e) => { table[key] = e.target.value; markDirty(); showProblem(e.target.value); },
       });
@@ -330,10 +340,16 @@ function renderSection(section) {
       }
       vwrap = el("div", { class: "vwrap" }, [control, optionList]);
       if (isSecret) {
-        vwrap.append(el("button", {
-          text: "👁", title: "show/hide while typing",
-          onclick: () => { control.type = control.type === "password" ? "text" : "password"; },
-        }));
+        const reveal = el("button", {
+          type: "button", text: "show", title: "show/hide while typing", "aria-pressed": "false",
+          onclick: () => {
+            control.type = control.type === "password" ? "text" : "password";
+            const shown = control.type === "text";
+            reveal.textContent = shown ? "hide" : "show";
+            reveal.setAttribute("aria-pressed", String(shown));
+          },
+        });
+        vwrap.append(reveal);
       }
       if (section.id === "global" && key === "root-password") {
         vwrap.append(el("button", {
@@ -359,7 +375,7 @@ function renderSection(section) {
 
     const helpText = def.description ? el("div", { class: "helptext", text: def.description, hidden: true }) : null;
     const helpBtn = def.description ? el("button", {
-      class: "help", type: "button", text: "?", title: "What is this?", "aria-expanded": "false",
+      class: "help", type: "button", text: "?", title: "What is this?", "aria-label": "About " + key, "aria-expanded": "false",
       onclick: () => {
         helpText.hidden = !helpText.hidden;
         helpBtn.setAttribute("aria-expanded", String(!helpText.hidden));
@@ -378,14 +394,14 @@ function renderSection(section) {
         isSecret ? el("span", { class: "tag", text: "secret" }) : null,
       ]),
       el("div", { class: "vcol" }, [vwrap, err, note.input, helpText]),
-      el("button", { text: "−", title: "remove", onclick: () => { delete table[key]; dropComment(section.id, key); markDirty(); renderAnswer(); } }),
+      el("button", { text: "−", title: "remove", "aria-label": "Remove " + key, onclick: () => { delete table[key]; dropComment(section.id, key); markDirty(); renderAnswer(); } }),
     ]));
   }
   wrap.append(rows);
   return wrap;
 }
 
-/* ----------------------------- validation ---------------------------- */
+// Validation
 
 const formatRegex = {};
 function formatHint(format) { return S.boot.schema.formats?.[format]?.hint || ""; }
@@ -427,7 +443,7 @@ function answerProblems() {
   return out;
 }
 
-/* ------------------------------ combobox ----------------------------- */
+// Combobox
 
 let tzOffsets = null;
 function optionLabel(def, option) {
@@ -454,10 +470,10 @@ function combo(def, current, onPick) {
   let value = current;
   const btnValue = el("span", { class: "combo-value" });
   const btnLabel = el("span", { class: "opt-label" });
-  const button = el("button", { type: "button", class: "combo-btn", "aria-haspopup": "listbox" }, [
+  const button = el("button", { type: "button", class: "combo-btn", "aria-haspopup": "listbox", "aria-expanded": "false" }, [
     el("span", { class: "combo-main" }, [btnValue, btnLabel]), el("span", { class: "combo-caret", text: "▾" }),
   ]);
-  const search = el("input", { type: "search", placeholder: "Search…", autocomplete: "off", spellcheck: "false" });
+  const search = el("input", { type: "search", placeholder: "Search…", "aria-label": "Search options", autocomplete: "off", spellcheck: "false" });
   const list = el("ul", { class: "combo-list", role: "listbox" });
   const pop = el("div", { class: "combo-pop", hidden: true }, [search, list]);
   const root = el("div", { class: "combo" }, [button, pop]);
@@ -476,7 +492,7 @@ function combo(def, current, onPick) {
     if (!shown.length) list.append(el("li", { class: "empty", text: "No matches" }));
     shown.forEach((o, i) => {
       list.append(el("li", {
-        role: "option", class: (i === active ? "active " : "") + (o === value ? "sel" : ""),
+        role: "option", "aria-selected": String(o === value), class: (i === active ? "active " : "") + (o === value ? "sel" : ""),
         onmousedown: (e) => { e.preventDefault(); pick(o); },
         onmousemove: () => { if (active !== i) { active = i; mark(); } },
       }, [el("span", { text: o }), el("span", { class: "opt-label", text: optionLabel(def, o) })]));
@@ -486,13 +502,14 @@ function combo(def, current, onPick) {
     [...list.children].forEach((li, i) => li.classList.toggle("active", i === active));
     list.children[active]?.scrollIntoView({ block: "nearest" });
   };
-  const close = () => { pop.hidden = true; document.removeEventListener("mousedown", outside); };
+  const close = () => { pop.hidden = true; button.setAttribute("aria-expanded", "false"); document.removeEventListener("mousedown", outside); };
   const outside = (e) => { if (!root.contains(e.target)) close(); };
   const open = () => {
     search.value = "";
     active = Math.max(0, def.options.indexOf(value));
     paintList();
     pop.hidden = false;
+    button.setAttribute("aria-expanded", "true");
     search.focus();
     mark();
     document.addEventListener("mousedown", outside);
@@ -511,7 +528,7 @@ function combo(def, current, onPick) {
   return root;
 }
 
-/* ------------------------------ comments ----------------------------- */
+// Comments
 
 function commentsFor(scope) {
   const all = (S.answer.doc.comments = S.answer.doc.comments || {});
@@ -532,7 +549,7 @@ function commentField(scope, key, { alwaysShow = false, placeholder } = {}) {
   const store = commentsFor(scope);
   let toggle = null;
   const input = el("input", {
-    class: "comment", maxlength: "200", value: store[key] || "",
+    class: "comment", maxlength: "200", value: store[key] || "", "aria-label": "Comment for " + key,
     placeholder: placeholder || "comment, written as a # line in answer.toml",
     oninput: (e) => {
       const v = e.target.value.replace(/[\r\n]+/g, " ");
@@ -544,13 +561,13 @@ function commentField(scope, key, { alwaysShow = false, placeholder } = {}) {
   if (alwaysShow) return { input, toggle: null };
   input.hidden = !store[key];
   toggle = el("button", {
-    class: "help" + (store[key] ? " on" : ""), type: "button", text: "#", title: "Add a comment",
+    class: "help" + (store[key] ? " on" : ""), type: "button", text: "#", title: "Add a comment", "aria-label": "Comment on " + key,
     onclick: () => { input.hidden = !input.hidden; if (!input.hidden) input.focus(); },
   });
   return { input, toggle };
 }
 
-/* ------------------------------- filters ----------------------------- */
+// Filters
 
 /** Structured rules: one field of the system information against a glob. */
 function renderMatchRules() {
@@ -578,14 +595,14 @@ function renderMatchRules() {
         oninput: (e) => { rule.field = e.target.value; markDirty(); } }),
       el("input", { value: rule.pattern, placeholder: "24:8a:07:1e:05:bc", "aria-label": "pattern", class: "mono",
         oninput: (e) => { rule.pattern = e.target.value; markDirty(); } }),
-      el("button", { text: "−", title: "remove rule", onclick: () => { rules.splice(i, 1); markDirty(); renderAnswer(); } }),
+      el("button", { text: "−", title: "remove rule", "aria-label": "Remove rule", onclick: () => { rules.splice(i, 1); markDirty(); renderAnswer(); } }),
     ]));
   }
   card.append(el("button", { text: "Add rule", onclick: () => { rules.push({ field: "", pattern: "" }); markDirty(); renderAnswer(); } }));
   return card;
 }
 
-/* ---------------------------- machine table -------------------------- */
+// Machine table
 
 /** RFC 4180-ish: quoted cells, doubled quotes, CRLF. Tab or ; delimited works too. */
 function parseCsv(text) {
@@ -637,7 +654,7 @@ function renderMachineTable() {
       "With rows here, this answer only claims machines that have one." }),
   ]);
   const field = el("input", { list: "match-fields", value: doc.fleet?.field || "network_interfaces[].mac", "aria-label": "key field", class: "mono" });
-  const ta = el("textarea", { class: "mono", rows: 6, placeholder: "mac,hostname,ip\n24:8a:07:1e:05:bc,pve1,10.0.0.11/24\n24:8a:07:1e:05:bd,pve2,10.0.0.12/24" });
+  const ta = el("textarea", { class: "mono", rows: 6, "aria-label": "Machine table CSV", placeholder: "mac,hostname,ip\n24:8a:07:1e:05:bc,pve1,10.0.0.11/24\n24:8a:07:1e:05:bd,pve2,10.0.0.12/24" });
   ta.value = toCsv(doc.fleet);
   const status = el("p", { class: "muted" });
   const update = () => {
@@ -647,7 +664,7 @@ function renderMachineTable() {
     try { rows = parseCsv(ta.value); } catch (e) { status.textContent = "Not valid CSV: " + e.message; status.className = "bad"; return; }
     if (!rows.length) {
       delete doc.fleet;
-      status.textContent = "No table." + usedText; status.className = "muted";
+      status.textContent = "No machine table." + usedText; status.className = "muted";
       return;
     }
     const [columns, ...body] = rows;
@@ -687,7 +704,7 @@ function renderFilters() {
     const card = el("div", { class: "card" }, [el("h3", { text: title }), el("p", { class: "muted", text: note })]);
     const dl = el("datalist", { id: "sysinfo-" + field });
     for (const k of S.sysinfoKeys) dl.append(el("option", { value: k }));
-    const input = el("input", { list: "sysinfo-" + field, placeholder: '"name":"PowerEdge R620"' });
+    const input = el("input", { list: "sysinfo-" + field, placeholder: '"name":"PowerEdge R620"', "aria-label": title });
     const add = () => {
       const v = input.value.trim();
       if (!v || values.includes(v)) return;
@@ -702,7 +719,7 @@ function renderFilters() {
           el("div", { class: "mono", style: "word-break: break-all", text: v }),
           note.input,
         ]),
-        el("button", { text: "−", onclick: () => { values.splice(i, 1); dropComment(field, v); markDirty(); renderAnswer(); } }),
+        el("button", { text: "−", title: "remove", "aria-label": "Remove " + v, onclick: () => { values.splice(i, 1); dropComment(field, v); markDirty(); renderAnswer(); } }),
       ]));
     }
     return card;
@@ -715,7 +732,7 @@ function renderFilters() {
     el("h3", { text: "Dry run" }),
     el("p", { class: "muted", text: "Paste a system_info payload (copy one from History) to see which answer would win." }),
   ]);
-  const ta = el("textarea", { placeholder: '{"dmi": {"system": {"name": "PowerEdge R620"}}}' });
+  const ta = el("textarea", { "aria-label": "system_info JSON", placeholder: '{"dmi": {"system": {"name": "PowerEdge R620"}}}' });
   const out = el("pre", { class: "toml", style: "margin-top:10px" });
   tester.append(ta, el("div", { style: "margin-top:8px" }, [el("button", {
     text: "Test match",
@@ -730,7 +747,7 @@ function renderFilters() {
       const machine = r.machine
         ? `\nmachine table row ${r.machine.row} (${r.machine.key}): ${Object.entries(r.machine.vars).map(([k, v]) => `${k}=${v}`).join(", ")}\n`
         : "";
-      out.textContent = `matched: ${r.matched}\nwould serve: ${r.would_serve}${r.reason ? " — " + r.reason : ""}\n${rules}${machine}${issues}\n${r.toml || ""}`;
+      out.textContent = `matched: ${r.matched}\nwould serve: ${r.would_serve}${r.reason ? " (" + r.reason + ")" : ""}\n${rules}${machine}${issues}\n${r.toml || ""}`;
     },
   })]), out);
   const col = el("div", { style: "grid-column: 1 / -1" }, [tester]);
@@ -738,7 +755,7 @@ function renderFilters() {
   return wrap;
 }
 
-/* ------------------------------- serving ----------------------------- */
+// Serving
 
 function renderServing() {
   const a = S.answer;
@@ -754,7 +771,7 @@ function renderServing() {
     ]));
   }
 
-  const ack = el("input", { type: "checkbox", ...(a.secrets_ack ? { checked: true } : {}) });
+  const ack = el("input", { type: "checkbox", id: "secrets-ack", ...(a.secrets_ack ? { checked: true } : {}) });
   ack.addEventListener("change", async () => {
     if (ack.checked) {
       const typed = await ask("Acknowledge credential hosting",
@@ -767,9 +784,9 @@ function renderServing() {
 
   const modeSel = el("select", {}, ["off", "armed", "always"].map((m) =>
     el("option", { value: m, ...(a.serve_mode === m ? { selected: true } : {}), text:
-      m === "off" ? "off — never serve this answer"
-      : m === "armed" ? "armed — serve only during an explicit window (recommended)"
-      : "always — serve to any request that matches" })));
+      m === "off" ? "off: never serve this answer"
+      : m === "armed" ? "armed: serve only during an explicit window (recommended)"
+      : "always: serve to any request that matches" })));
   modeSel.addEventListener("change", () => {
     if (modeSel.value === "always" && a.has_secrets && !c.allow_always_secrets) {
       toast('This deployment refuses "always" for answers holding credentials.', "bad");
@@ -779,13 +796,13 @@ function renderServing() {
     a.serve_mode = modeSel.value; markDirty();
   });
 
-  const minutes = el("input", { type: "number", value: c.arm_default_minutes, min: "1", max: "1440", style: "width:90px" });
-  const serves = el("input", { type: "number", value: "1", min: "1", max: "100", style: "width:90px" });
+  const minutes = el("input", { type: "number", value: c.arm_default_minutes, min: "1", max: "1440", style: "width:90px", "aria-label": "Arm for minutes" });
+  const serves = el("input", { type: "number", value: "1", min: "1", max: "100", style: "width:90px", "aria-label": "Maximum serves" });
 
   wrap.append(el("div", { class: "card" }, [
     el("h3", { text: "Serving" }),
     el("label", { class: "field" }, [el("span", { text: "Mode" }), modeSel]),
-    el("div", { class: "checkline" }, [ack, el("label", { text: "I accept that serving this answer exposes any credential it contains to whoever can reach the endpoint." })]),
+    el("div", { class: "checkline" }, [ack, el("label", { for: "secrets-ack", text: "I accept that serving this answer exposes any credential it contains to whoever can reach the endpoint." })]),
     el("div", { class: "inline", style: "margin-top:10px" }, [
       el("span", { class: "muted", text: "Arm for" }), minutes, el("span", { class: "muted", text: "minutes, max" }), serves, el("span", { class: "muted", text: "serves" }),
       el("button", { class: "primary", text: "Arm now", onclick: async () => {
@@ -833,7 +850,7 @@ function renderServing() {
   return wrap;
 }
 
-/* ------------------------------ raw TOML ----------------------------- */
+// Raw TOML
 
 const SECRET_KEY_RE = /(^|[-_.])(password|passwd|secret|token|api[-_]?key|private[-_]?key)([-_.]|$)/i;
 
@@ -879,7 +896,7 @@ function renderSource() {
   const a = S.answer;
   const area = el("textarea", {
     class: "toml-edit", spellcheck: "false", rows: "24", "aria-label": "answer.toml source",
-    oninput: (e) => { S.tomlDraft = e.target.value; status.textContent = "edited — not applied yet"; },
+    oninput: (e) => { S.tomlDraft = e.target.value; status.textContent = "edited, not applied yet"; },
   });
   const status = el("span", { class: "muted" });
   const notes = el("div");
@@ -890,7 +907,7 @@ function renderSource() {
     status.textContent = "";
     notes.innerHTML = "";
   };
-  if (S.tomlDraft !== null && S.tomlDraft !== undefined) { area.value = S.tomlDraft; status.textContent = "edited — not applied yet"; }
+  if (S.tomlDraft !== null && S.tomlDraft !== undefined) { area.value = S.tomlDraft; status.textContent = "edited, not applied yet"; }
   else load();
 
   const apply = async () => {
@@ -904,7 +921,7 @@ function renderSource() {
       if (w) notes.append(el("p", { class: "muted", text: "Applied, with notes:" }), w);
       toast("Applied to the editor. Review the tabs, then Save.", all.length ? "warn" : "ok");
       $("#answer-save").textContent = "Save •";
-      status.textContent = "applied — not saved yet";
+      status.textContent = "applied, not saved yet";
     } catch (err) {
       toast(err.message, "bad", 12000);
     }
@@ -916,7 +933,7 @@ function renderSource() {
       if (!f) return;
       area.value = await f.text();
       S.tomlDraft = area.value;
-      status.textContent = `loaded ${f.name} — not applied yet`;
+      status.textContent = `loaded ${f.name}, not applied yet`;
       e.target.value = "";
     },
   });
@@ -939,7 +956,7 @@ function renderSource() {
   ]);
 }
 
-/* ------------------------------- preview ----------------------------- */
+// Preview
 
 /** Card listing what the installer would reject in the merged answer, or null. */
 function problemCard(problems, saved = true) {
@@ -956,12 +973,14 @@ function renderPreview() {
   const pre = el("pre", { class: "toml", text: "loading…" });
   const issues = el("div");
   const load = async (reveal) => {
-    const r = await api(`/answers/${encodeURIComponent(a.name)}/preview` + (reveal ? "?reveal=1" : ""));
+    let r;
+    try { r = await api(`/answers/${encodeURIComponent(a.name)}/preview` + (reveal ? "?reveal=1" : "")); }
+    catch (err) { pre.textContent = "Could not load the preview: " + err.message; return; }
     pre.textContent = r.toml;
     issues.innerHTML = "";
     const card = problemCard(r.problems, true);
     if (card) issues.append(card);
-    if (reveal) toast("Credentials revealed — this is recorded in the audit log.", "warn");
+    if (reveal) toast("Credentials revealed. The reveal is recorded in the audit log.", "warn");
   };
   load(false);
   const wrap = el("div", {}, [issues, el("div", { class: "card" }, [
@@ -979,9 +998,7 @@ function renderPreview() {
   return wrap;
 }
 
-/* ------------------------------- history ----------------------------- */
-
-/* ------------------------------ versions ----------------------------- */
+// Versions
 
 /** Line diff by longest common subsequence: [[" " | "+" | "-", line], ...]. */
 function diffLines(a, b) {
@@ -1023,7 +1040,7 @@ function diffView(ops) {
 function renderVersions() {
   const name = S.answer.name;
   const wrap = el("div");
-  const list = el("tbody");
+  const list = el("tbody", {}, [el("tr", {}, [el("td", { colspan: "4", class: "muted", text: "Loading versions…" })])]);
   const detail = el("div", { class: "card", hidden: true });
   wrap.append(
     el("div", { class: "card" }, [
@@ -1062,7 +1079,7 @@ function renderVersions() {
       } catch (err) { toast(err.message, "bad", 12000); }
     } });
     detail.append(
-      el("h3", { text: `#${v.id} — ${new Date(v.created_at).toLocaleString()} by ${v.created_by || "unknown"} (${v.reason})` }),
+      el("h3", { text: `#${v.id}: ${new Date(v.created_at).toLocaleString()} by ${v.created_by || "unknown"} (${v.reason})` }),
       el("div", { style: "display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px" }, [mode, restore]),
     );
     const [from, to] = against === "current" ? [await textOf(v.id), await textOf(base.id)] : [base ? await textOf(base.id) : "", await textOf(v.id)];
@@ -1071,16 +1088,19 @@ function renderVersions() {
   };
 
   api(`/answers/${encodeURIComponent(name)}/versions`).then(({ versions }) => {
+    list.innerHTML = "";
     if (!versions.length) list.append(el("tr", {}, [el("td", { colspan: "4", class: "muted", text: "No versions yet: the next save starts the history." })]));
-    versions.forEach((v, idx) => list.append(el("tr", { onclick: () => show(versions, idx, "previous") }, [
+    versions.forEach((v, idx) => list.append(el("tr", { onclick: () => show(versions, idx, "previous"), onkeydown: onActivate(() => show(versions, idx, "previous")), tabindex: "0" }, [
       el("td", { text: `#${v.id}${idx === 0 ? " (current)" : ""}` }),
       el("td", { text: new Date(v.created_at).toLocaleString() }),
       el("td", { text: v.created_by }),
       el("td", { text: v.reason }),
     ])));
-  }).catch((err) => list.append(el("tr", {}, [el("td", { colspan: "4", class: "bad", text: err.message })])));
+  }).catch((err) => { list.innerHTML = ""; list.append(el("tr", {}, [el("td", { colspan: "4", class: "bad", text: "Could not load versions: " + err.message })])); });
   return wrap;
 }
+
+// History
 
 /** served/relayed are done, queued/relaying/retrying are still in flight, the rest failed. */
 function outcomeClass(outcome) {
@@ -1093,7 +1113,7 @@ function renderHistory() {
   const wrap = el("div");
   const detail = el("div", { class: "card", hidden: true });
   const table = el("table");
-  const tbody = el("tbody");
+  const tbody = el("tbody", {}, [el("tr", {}, [el("td", { colspan: "5", class: "muted", text: "Loading requests…" })])]);
   table.append(el("thead", {}, [el("tr", {}, [
     el("th", { text: "When" }), el("th", { text: "System" }), el("th", { text: "Answer" }),
     el("th", { text: "Outcome" }), el("th", { text: "Client" }),
@@ -1101,36 +1121,44 @@ function renderHistory() {
 
   const draw = (rows) => {
     tbody.innerHTML = "";
-    if (!rows.length) tbody.append(el("tr", {}, [el("td", { colspan: "5", class: "muted", text: "No requests yet." })]));
+    if (!rows.length) tbody.append(el("tr", {}, [el("td", { colspan: "5", class: "muted", text: "No requests yet. A row appears each time an installer asks for an answer." })]));
     for (const row of rows) {
-      tbody.append(el("tr", { onclick: () => {
+      const open = () => {
         detail.hidden = false;
         detail.innerHTML = "";
         detail.append(
-          el("h3", { text: `${new Date(row.ts).toLocaleString()} — ${row.outcome}${row.detail ? " (" + row.detail + ")" : ""}` }),
+          el("h3", { text: `${new Date(row.ts).toLocaleString()}: ${row.outcome}${row.detail ? " (" + row.detail + ")" : ""}` }),
           el("div", { class: "split" }, [
             el("div", {}, [el("h3", { text: "system_info" }), el("pre", { class: "toml", text: pretty(row.system_info) })]),
-            el("div", {}, [el("h3", { text: "response (credentials redacted)" }), el("pre", { class: "toml", text: row.response || "—" })]),
+            el("div", {}, [el("h3", { text: "response (credentials redacted)" }), el("pre", { class: "toml", text: row.response || "(no response)" })]),
           ]),
         );
-      } }, [
+      };
+      tbody.append(el("tr", { onclick: open, onkeydown: onActivate(open), tabindex: "0" }, [
         el("td", { text: new Date(row.ts).toLocaleString() }),
-        el("td", { text: row.system_name || "—" }),
-        el("td", { text: row.answer || row.detail || "—" }),
+        el("td", { text: row.system_name || "" }),
+        el("td", { text: row.answer || row.detail || "" }),
         el("td", { class: outcomeClass(row.outcome), text: row.outcome }),
-        el("td", { class: "mono", text: row.ip || "—" }),
+        el("td", { class: "mono", text: row.ip || "" }),
       ]));
     }
   };
 
   const refresh = async () => {
-    const r = await api("/history?limit=200" + (S.answer ? "&answer=" + encodeURIComponent(S.answer.name) : ""));
+    let r;
+    try { r = await api("/history?limit=200" + (S.answer ? "&answer=" + encodeURIComponent(S.answer.name) : "")); }
+    catch (err) {
+      tbody.innerHTML = "";
+      tbody.append(el("tr", {}, [el("td", { colspan: "5", class: "bad", text: "Could not load history: " + err.message })]));
+      return;
+    }
     S.history = r.history;
     draw(S.history);
   };
-  const liveBtn = el("button", { text: S.live ? "Live ●" : "Live ○", onclick: () => {
+  const liveBtn = el("button", { text: S.live ? "Live ●" : "Live ○", title: "Poll for new requests every 5 seconds", "aria-pressed": String(S.live), onclick: () => {
     S.live = !S.live;
     liveBtn.textContent = S.live ? "Live ●" : "Live ○";
+    liveBtn.setAttribute("aria-pressed", String(S.live));
     if (S.live) startPolling(); else stopPolling();
   } });
 
@@ -1151,7 +1179,7 @@ function renderHistory() {
 }
 
 function pretty(raw) {
-  try { return JSON.stringify(JSON.parse(raw), null, 2); } catch { return raw || "—"; }
+  try { return JSON.stringify(JSON.parse(raw), null, 2); } catch { return raw || "(empty)"; }
 }
 
 function startPolling() {
@@ -1171,7 +1199,7 @@ function startPolling() {
 }
 function stopPolling() { if (S.timer) clearInterval(S.timer); S.timer = null; }
 
-/* -------------------------------- relays ----------------------------- */
+// Relays
 
 async function openRelay(name) {
   const r = S.relays.find((x) => x.name === name);
@@ -1194,10 +1222,10 @@ function renderRelay() {
   url.addEventListener("input", () => { r.url = url.value; });
   const method = el("select", {}, ["POST", "PUT", "PATCH"].map((m) => el("option", { value: m, ...(r.method === m ? { selected: true } : {}), text: m })));
   method.addEventListener("change", () => { r.method = method.value; });
-  const enabled = el("input", { type: "checkbox", ...(r.enabled ? { checked: true } : {}) });
+  const enabled = el("input", { type: "checkbox", id: "relay-enabled", ...(r.enabled ? { checked: true } : {}) });
   enabled.addEventListener("change", () => { r.enabled = enabled.checked; });
   const hmac = el("input", { type: "password", value: r.hmac_secret === MASK ? "" : r.hmac_secret || "",
-    placeholder: r.has_hmac ? "stored, encrypted — type to replace" : "optional shared secret for X-AutoPVE-Signature" });
+    placeholder: r.has_hmac ? "stored, encrypted; type to replace" : "optional shared secret for X-AutoPVE-Signature" });
   hmac.addEventListener("input", () => { r.hmac_secret = hmac.value; });
   const tmpl = el("textarea", { value: r.body_template || "", placeholder:
     'Leave empty to forward the installer payload verbatim, or build your own JSON, e.g.\n{"ref":"main","inputs":{"host":"{{ system_info.dmi.system.name }}","version":"{{ system_info.product.version }}"}}' });
@@ -1207,16 +1235,16 @@ function renderRelay() {
   const drawHeaders = () => {
     headerBox.innerHTML = "";
     for (const [k, v] of Object.entries(r.headers || {})) {
-      const value = el("input", { type: "password", value: v === MASK ? "" : v, placeholder: v === MASK ? "stored, encrypted" : "value" });
+      const value = el("input", { type: "password", value: v === MASK ? "" : v, placeholder: v === MASK ? "stored, encrypted" : "value", "aria-label": k + " header value" });
       value.addEventListener("input", () => { r.headers[k] = value.value; });
       headerBox.append(el("div", { class: "keyrow" }, [
         el("div", { class: "kname", text: k }), value,
-        el("button", { text: "−", onclick: () => { delete r.headers[k]; drawHeaders(); } }),
+        el("button", { text: "−", title: "remove", "aria-label": "Remove header " + k, onclick: () => { delete r.headers[k]; drawHeaders(); } }),
       ]));
     }
-    const nk = el("input", { placeholder: "Authorization" });
-    const nv = el("input", { placeholder: "Bearer …", type: "password" });
-    headerBox.append(el("div", { class: "keyrow" }, [nk, nv, el("button", { text: "+", onclick: () => {
+    const nk = el("input", { placeholder: "Authorization", "aria-label": "New header name" });
+    const nv = el("input", { placeholder: "Bearer …", type: "password", "aria-label": "New header value" });
+    headerBox.append(el("div", { class: "keyrow" }, [nk, nv, el("button", { text: "+", title: "Add header", "aria-label": "Add header", onclick: () => {
       if (!nk.value.trim()) return;
       r.headers = r.headers || {};
       r.headers[nk.value.trim()] = nv.value;
@@ -1228,9 +1256,9 @@ function renderRelay() {
   body.append(
     el("div", { class: "card" }, [
       el("h3", { text: "Target" }),
-      el("p", { class: "muted", text: "A Worker has no shell, so instead of running ansible-playbook this forwards the installer's post-installation payload to something that can. The target must be reachable from Cloudflare's network — public, or behind a Cloudflare Tunnel." }),
+      el("p", { class: "muted", text: "A Worker has no shell, so instead of running ansible-playbook this forwards the installer's post-installation payload to something that can. The target must be reachable from Cloudflare's network: public, or behind a Cloudflare Tunnel." }),
       field("URL", url), field("Method", method),
-      el("div", { class: "checkline" }, [enabled, el("label", { text: "Enabled" })]),
+      el("div", { class: "checkline" }, [enabled, el("label", { for: "relay-enabled", text: "Enabled" })]),
     ]),
     el("div", { class: "card" }, [
       el("h3", {}, [el("span", { text: "Credentials" }), el("span", { class: "tag", text: "encrypted at rest" })]),
@@ -1254,7 +1282,9 @@ function renderRelay() {
 async function loadRelayLog() {
   const box = $("#relay-log");
   if (!box || !S.relay) return;
-  const r = await api("/relay-log?relay=" + encodeURIComponent(S.relay.name));
+  let r;
+  try { r = await api("/relay-log?relay=" + encodeURIComponent(S.relay.name)); }
+  catch (err) { r = { log: [], error: err.message }; }
   for (const old of box.querySelectorAll("table")) old.remove();
   const tbody = el("tbody");
   for (const row of r.log || []) {
@@ -1265,13 +1295,14 @@ async function loadRelayLog() {
       el("td", { class: "mono", text: (row.response || "").slice(0, 120) }),
     ]));
   }
-  if (!(r.log || []).length) tbody.append(el("tr", {}, [el("td", { colspan: "4", class: "muted", text: "No deliveries yet." })]));
+  if (r.error) tbody.append(el("tr", {}, [el("td", { colspan: "4", class: "bad", text: "Could not load the delivery log: " + r.error })]));
+  else if (!(r.log || []).length) tbody.append(el("tr", {}, [el("td", { colspan: "4", class: "muted", text: "No deliveries yet. Send test posts a sample payload to the target." })]));
   box.append(el("table", {}, [el("thead", {}, [el("tr", {}, [
     el("th", { text: "When" }), el("th", { text: "Attempt" }), el("th", { text: "Result" }), el("th", { text: "Response" }),
   ])]), tbody]));
 }
 
-/* -------------------------------- files ------------------------------ */
+// Files
 
 function openFiles() {
   S.answer = null; S.relay = null;
@@ -1293,10 +1324,10 @@ function openFiles() {
       } })]),
     ]));
   }
-  if (!S.files.length) tbody.append(el("tr", {}, [el("td", { colspan: "5", class: "muted", text: "No files hosted." })]));
+  if (!S.files.length) tbody.append(el("tr", {}, [el("td", { colspan: "5", class: "muted", text: "No files hosted. Use upload in the sidebar to add one." })]));
   body.append(el("div", { class: "card" }, [
     el("h3", { text: "First-boot scripts and other downloads" }),
-    el("p", { class: "muted", text: "Anything here is downloadable by whoever can reach the URL — the installer cannot authenticate. Never put a credential in a hosted script; fetch it at first boot from something that can check identity." }),
+    el("p", { class: "muted", text: "Anyone who can reach the URL can download anything here, because the installer cannot authenticate. Never put a credential in a hosted script; fetch it at first boot from something that can check identity." }),
     el("table", {}, [el("thead", {}, [el("tr", {}, [
       el("th", { text: "Name" }), el("th", { text: "Size" }), el("th", { text: "Store" }), el("th", { text: "URL" }), el("th", {}),
     ])]), tbody]),
@@ -1304,7 +1335,7 @@ function openFiles() {
   showPane("files-pane");
 }
 
-/* ------------------------------ installs ----------------------------- */
+// Installs
 
 function ago(ts) {
   if (!ts) return "";
@@ -1325,7 +1356,8 @@ const INSTALL_STATES = {
 async function loadInstalls() {
   const body = $("#installs-body");
   let data;
-  try { data = await api("/installs"); } catch (err) { body.innerHTML = ""; body.append(el("div", { class: "card bad", text: err.message })); return; }
+  if (!body.childElementCount) body.append(el("p", { class: "muted", text: "Loading installs…" }));
+  try { data = await api("/installs"); } catch (err) { body.innerHTML = ""; body.append(el("div", { class: "card bad", text: "Could not load installs: " + err.message })); return; }
   const rows = data.installs || [];
   const state = (r) => (r.no_report ? "no_report" : r.status);
   const counts = {};
@@ -1349,11 +1381,11 @@ async function loadInstalls() {
         el("div", { text: r.fqdn || r.system_name || "(unnamed)" }),
         el("div", { class: "muted mono", style: "font-size:12px; word-break:break-all", text: r.machine_id }),
       ]),
-      el("td", { text: r.answer || "—" }),
+      el("td", { text: r.answer || "" }),
       el("td", {}, [el("span", { class: cls, title: hint, text: label })]),
       el("td", { title: new Date(r.updated_at).toLocaleString(), text: ago(r.updated_at) }),
       el("td", {}, [el("div", { text: r.ip }), r.detail ? el("div", { class: "muted", style: "font-size:12px", text: r.detail }) : null]),
-      el("td", {}, [el("button", { text: "forget", title: "Remove this machine from the dashboard", onclick: async () => {
+      el("td", {}, [el("button", { text: "forget", title: "Remove this machine from the dashboard", "aria-label": "Forget " + (r.fqdn || r.system_name || r.machine_id), onclick: async () => {
         await api("/installs/" + encodeURIComponent(r.machine_id), { method: "DELETE" });
         loadInstalls();
       } })]),
@@ -1374,7 +1406,7 @@ async function openInstalls() {
   S.installsTimer = setInterval(() => { if (!document.hidden) loadInstalls(); }, 10000);
 }
 
-/* ----------------------------- global wiring -------------------------- */
+// Global wiring
 
 async function refreshAnswerList() {
   S.answers = (await api("/answers")).answers;
@@ -1411,7 +1443,7 @@ function wireGlobalButtons() {
       renderAnswer();
       const all = [...(parsed.warnings || []), ...extra];
       if (all.length) toast("Imported with notes: " + all.join(" "), "warn", 15000);
-      else toast("Imported — review it, then Save.");
+      else toast("Imported. Review it, then Save.");
     } catch (err) { toast(err.message, "bad", 12000); }
   };
   $("#answer-copy").onclick = async () => {
@@ -1442,7 +1474,7 @@ function wireGlobalButtons() {
     if (!S.answer) return;
     const problems = answerProblems();
     if (problems.length) {
-      toast("Not saved — fix these first: " + problems.join("; "), "bad", 12000);
+      toast("Not saved. Fix these first: " + problems.join("; "), "bad", 12000);
       return;
     }
     try {
@@ -1513,6 +1545,7 @@ function wireGlobalButtons() {
 
   $("#file-add").onclick = () => $("#file-input").click();
   $("#installs-open").onclick = openInstalls;
+  $("#installs-open").onkeydown = onActivate(openInstalls);
   $("#installs-refresh").onclick = loadInstalls;
   $("#installs-clear").onclick = async () => {
     const r = await api("/installs?status=installed", { method: "DELETE" });

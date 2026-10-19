@@ -82,8 +82,6 @@ export function findMachine(fleet: Fleet, info: unknown): Machine | null {
   return null;
 }
 
-/* ------------------------------ placeholders ----------------------------- */
-
 /** Apply `fn` to every string in the answer's TOML sections (not metadata, not comments). */
 function mapStrings(doc: AnswerDoc, fn: (text: string, section: string, key: string) => string): AnswerDoc {
   const out: AnswerDoc = { ...doc };

@@ -3,7 +3,7 @@
  *
  * Every key the Proxmox automated installer understands is described here once
  * and reused by the API (validation, secret classification) and by the UI
- * (pulldowns, help text). Keys not in the catalogue are still allowed — the
+ * (pulldowns, help text). Keys not in the catalogue are still allowed: the
  * upstream app lets you type a unique key and so does this one.
  */
 

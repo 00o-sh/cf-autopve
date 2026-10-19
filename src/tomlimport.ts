@@ -76,8 +76,6 @@ function leaf(value: unknown, where: string, warnings: string[]): unknown {
   return String(value);
 }
 
-/* ---------------------------- comment scan ---------------------------- */
-
 /** Split `a."b.c".d` into segments, honouring basic and literal quoted keys. */
 function splitKey(raw: string): string[] | null {
   const segs: string[] = [];
@@ -122,8 +120,6 @@ function scanComments(text: string): Map<string, string> {
   }
   return out;
 }
-
-/* ------------------------------- import ------------------------------- */
 
 export function parseAnswerToml(text: string): ImportResult {
   if (text.length > MAX_TOML_BYTES) throw new ValidationError("That file is too large to be an answer file.");

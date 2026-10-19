@@ -1,8 +1,8 @@
 /**
  * Guardrails for the public endpoints.
  *
- * The answer endpoint is by definition unauthenticated — the Proxmox installer
- * has no credential to present — so anything an answer holds is readable by
+ * The answer endpoint is by definition unauthenticated (the Proxmox installer
+ * has no credential to present), so anything an answer holds is readable by
  * whoever can reach the URL while it is being served. These checks are what
  * keep that window small and deliberate:
  *
@@ -31,8 +31,6 @@ const ALLOW: Decision = { allowed: true, reason: "" };
 function deny(reason: string): Decision {
   return { allowed: false, reason };
 }
-
-/* ---------------------------- IP / CIDR ---------------------------- */
 
 function ipv4ToBig(ip: string): bigint | null {
   const parts = ip.split(".");
@@ -95,8 +93,6 @@ export function ipAllowed(ip: string, cidrs: string[]): boolean {
   return cidrs.some((c) => ipMatchesCidr(ip, c));
 }
 
-/* ---------------------------- Serve token -------------------------- */
-
 /**
  * When SERVE_TOKEN is set, the installer must present it in one of these:
  *
@@ -119,8 +115,6 @@ export function tokenOk(env: Env, request: Request, pathToken: string | null): b
   if (header && timingSafeEqual(header, expected)) return true;
   return !!pathToken && timingSafeEqual(pathToken, expected);
 }
-
-/* ---------------------------- Serve decision ----------------------- */
 
 export interface ServeContext {
   request: Request;
@@ -184,7 +178,7 @@ export async function claimServe(env: Env, record: AnswerRecord, now = Date.now(
 /**
  * Relays trigger real automation, and /hook has no arm window or allowlist,
  * so without a SERVE_TOKEN anyone who can guess a relay name could fire it
- * with a payload of their choosing — signed with your HMAC secret. Relays are
+ * with a payload of their choosing, signed with your HMAC secret. Relays are
  * therefore refused outright until a token is configured.
  */
 export function hookAllowed(env: Env, request: Request, pathToken: string | null, bodyToken: unknown = null): Decision {
@@ -215,8 +209,6 @@ export async function disarmAnswer(env: Env, name: string): Promise<void> {
 export function defaultArmMinutes(env: Env): number {
   return num(env.ARM_DEFAULT_MINUTES, 30);
 }
-
-/* ---------------------- Configurator write origin ------------------ */
 
 const WRITE_TYPES = ["application/json", "application/octet-stream"];
 

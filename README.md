@@ -1,12 +1,12 @@
 # cf-autopve
 
-A port of [`00o-sh/autopve`](https://github.com/00o-sh/autopve) — the GUI configurator for
-[Proxmox VE automated installation](https://pve.proxmox.com/wiki/Automated_Installation) answer files —
+A port of [`00o-sh/autopve`](https://github.com/00o-sh/autopve), the GUI configurator for
+[Proxmox VE automated installation](https://pve.proxmox.com/wiki/Automated_Installation) answer files,
 to a single Cloudflare Worker with D1 storage.
 
 The upstream project is a NiceGUI app that both **builds** answer files and **hosts** them for the
 installer to fetch. This port keeps both, but reverses their emphasis: the configurator is the product,
-and hosting is an explicitly-armed, audited, guarded mode you opt into per answer. That is deliberate —
+and hosting is an explicitly-armed, audited, guarded mode you opt into per answer. That is deliberate:
 an answer file can contain `root-password`, and the Proxmox installer cannot authenticate, so anything
 that can reach a live answer endpoint can read whatever that answer holds.
 
@@ -36,15 +36,15 @@ that can reach a live answer endpoint can read whatever that answer holds.
 | live notifications over websocket | history polling → toasts (5 s, toggleable) | no DO/websocket dependency; same information |
 | no auth at all | **Cloudflare Access** on `/` and `/api/*`, verified in the Worker | the configurator is the sensitive surface |
 | `ansible-playbook` execution | **outbound webhook relay** (`/hook/<name>`) | a Worker has no shell; relay to something that does |
-| SSH keypair tab (for the built-in ansible runner) | *removed* | nothing here SSHes anywhere any more. To get a key onto new nodes, set `root-ssh-keys` in the Global section — the automation target brings its own credentials |
+| SSH keypair tab (for the built-in ansible runner) | *removed* | nothing here SSHes anywhere any more. To get a key onto new nodes, set `root-ssh-keys` in the Global section; the automation target brings its own credentials |
 | files on disk (`data/files`) | D1 blobs, optional R2 for large files | no filesystem on Workers |
 | secrets stored and served in the clear | encrypted at rest, acknowledged, armed, rate-limited, audited | see below |
 
-Two upstream bugs are fixed along the way: the disk-setup merge compared `disk_list` against a key
+This port also fixes two upstream bugs: the disk-setup merge compared `disk_list` against a key
 actually stored as `disk-list` (so filters and an inherited disk list could both survive a merge), and
 `reboot-on-error = "true"` was emitted as a string instead of a TOML boolean.
 
-## Hosting secrets — the part worth reading
+## Hosting secrets
 
 An answer file is served to an unauthenticated client, because that is all the Proxmox installer can be.
 Every guardrail below narrows *when* and *to whom*; none of them make hosting a plaintext root password
@@ -63,7 +63,7 @@ If you do host:
    credential (`*password*`, `*secret*`, `*token*`, `*api-key*`, `*private-key*`) are encrypted with
    AES-256-GCM under the `ANSWER_ENC_KEY` Worker secret before they touch D1. A database dump without
    that secret yields `enc:v1:…` and nothing else. **Without `ANSWER_ENC_KEY` set, a credential field
-   cannot be saved at all** — the API refuses rather than silently storing plaintext.
+   cannot be saved at all.** The API refuses rather than silently storing plaintext.
 2. **Explicit acknowledgement.** An answer that holds a credential will not save until someone ticks the
    acknowledgement (typing `HOST SECRETS`) on the Serving tab. That flag is per answer and recorded.
 3. **Armed windows.** Credential-bearing answers default to `serve_mode = "armed"`: they are refused
@@ -77,8 +77,9 @@ If you do host:
      `--answer-auth-token` (PVE 9.2+)
    - the `X-AutoPVE-Token` header
    - a path segment, `POST /answer/<token>`, for older installers that only take a URL. This puts the
-     token in URLs and logs. The allowlist is
-   the only per-answer access control: **filters are for routing, not security** (see
+     token in URLs and logs.
+
+   The allowlist is the only per-answer access control: **filters are for routing, not security** (see
    [Answers](#answers)).
 5. **HTTPS required.** Credentials are never served over plain HTTP (`REQUIRE_HTTPS`, default on).
 6. **Nothing leaks into history.** Request history stores the response with credentials replaced by
@@ -86,7 +87,7 @@ If you do host:
    deliberate action and lands in the audit log with the Access identity that did it.
 7. **Denials are recorded.** A refused fetch is written to history with its reason, so probing is visible.
 8. **Uploaded files are scanned.** A first-boot script containing something that looks like a password or
-   a private key is flagged at upload — `/files/*` is as public as `/answer`.
+   a private key is flagged at upload, because `/files/*` is as public as `/answer`.
 9. **No cross-site writes.** The configurator API is authenticated by the Access cookie, which a
    browser may attach to a request another site triggers. Every write must come from this origin
    (`Sec-Fetch-Site` / `Origin`), and a POST must carry a JSON or octet-stream body, which a plain HTML
@@ -146,14 +147,14 @@ Then put **Cloudflare Access** in front of the configurator:
 
    The second app is required: Access sits in front of the Worker, so with only the first app the
    installer gets a login page instead of its answer. It has to be a separate app because Access
-   policies apply to every path in an app — Access picks the most specific app by path first, so these
+   policies apply to every path in an app. Access picks the most specific app by path first, so these
    three paths land on the Bypass app and everything else on the login app. The Worker's own guards
    (arming, allowlists, token, rate limit) still apply behind the bypass.
 3. Copy the **configurator** app's **Application Audience (AUD) tag** into `ACCESS_AUD` and your team
    domain into `ACCESS_TEAM_DOMAIN` in `wrangler.toml`, then redeploy. The installer app's AUD is not
-   used — bypassed requests carry no Access token.
+   used: bypassed requests carry no Access token.
 
-The Worker verifies the Access JWT itself — signature against your team's JWKS, `iss`, `aud`, `exp` —
+The Worker verifies the Access JWT itself (signature against your team's JWKS, `iss`, `aud`, `exp`),
 so a request that bypasses the Access hostname still gets nothing. Until those two vars are set, the
 configurator refuses to load (fail closed); the installer endpoints keep working.
 
@@ -231,7 +232,7 @@ writes the report outside the repository. CodeQL skips that directory.
 
 `Default` is the base; every other answer inherits from it and overrides key by key, exactly as upstream.
 An answer is chosen by its **filters**. First match by `priority` (then name) wins; no match falls back
-to `Default`. The Filters tab has a dry-run box — paste a `system_info` payload from History and see which
+to `Default`. The Filters tab has a dry-run box: paste a `system_info` payload from History and see which
 answer would win, which rules hit (and against which values), and whether it would actually be served.
 
 **Match rules** test one field of the posted `system_info` against a glob:
@@ -245,7 +246,7 @@ answer would win, which rules hit (and against which values), and whether it wou
 | `product.product`, `iso.release` | `pve`, `9.*` |
 
 - A field is a dotted path; `[]` means "any element of this list", so the MAC rule matches if any NIC
-  has that address. Any path works, the list above is just what the editor suggests.
+  has that address. Any path works; the list above is what the editor suggests.
 - Patterns are anchored, case-insensitive globs: `*` any run, `?` one character, `[abc]` / `[!a]` sets.
 - *All rules* requires every rule to hit; *any rule* requires one.
 - The older **text filter** is still there: *must not contain* vetoes an answer whenever one of its
@@ -521,6 +522,9 @@ unless you give a template (below).
   the delivery log says how many attempts ran and that it stopped, instead of the retries vanishing.
   Payloads too large for a queue message (over about 100 KB) also take this path.
 
+**Body template.** A relay with a body template sends the rendered template instead of the installer's
+body. `{{ path }}` placeholders are filled from `system_info` (the installer's payload), `relay` and
+`now`; strings are JSON-escaped, so a JSON template stays valid JSON:
 
 ```json
 {"ref":"main","inputs":{"host":"{{ system_info.dmi.system.name }}","version":"{{ system_info.product.version }}"}}
@@ -542,7 +546,7 @@ if not hmac.compare_digest(expected, sig.removeprefix("sha256=")) or abs(time.ti
     abort(401)
 ```
 
-The target must be reachable from Cloudflare's network — a LAN address is rejected with an explanation.
+The target must be reachable from Cloudflare's network; a LAN address is rejected with an explanation.
 Put a Cloudflare Tunnel in front of an internal runner if that is where the work happens.
 
 ### Install tracking
@@ -592,8 +596,8 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 
 | var | default | meaning |
 |---|---|---|
-| `ACCESS_TEAM_DOMAIN` | — | `https://<team>.cloudflareaccess.com`; required |
-| `ACCESS_AUD` | — | Access application AUD tag; required |
+| `ACCESS_TEAM_DOMAIN` | none | `https://<team>.cloudflareaccess.com`; required |
+| `ACCESS_AUD` | none | Access application AUD tag; required |
 | `ARM_DEFAULT_MINUTES` | `30` | default length of an arm window |
 | `REQUIRE_HTTPS` | `true` | refuse to serve credentials over plain HTTP |
 | `ALLOW_ALWAYS_SECRETS` | `false` | permit `serve_mode = "always"` on credential-bearing answers |
