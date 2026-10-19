@@ -220,6 +220,12 @@ CodeQL and zizmor findings land in the repository's **Security → Code scanning
 and push protection are repository settings rather than workflows: turn them on under
 **Settings → Code security** (free for public repositories).
 
+For a source audit beyond what the scanners catch, `.claude/skills/security-audit` vendors Cloudflare's
+[security-audit skill](https://github.com/cloudflare/security-audit-skill) (MIT; pinned commit in its
+`VENDORED.md`). In Claude Code on this repository, ask for "a security audit of this repo": it maps the
+trust boundaries, hunts with isolated agents, has every candidate checked by a separate verifier, and
+writes the report outside the repository. CodeQL skips that directory.
+
 ## Using it
 
 ### Answers
