@@ -27,11 +27,12 @@ bootstrap_hook_text() {
 #
 # Installed by scripts/build-iso.sh --bootstrap-range into the installer's
 # /etc/dhcp/dhclient-exit-hooks.d/. dhclient-script *sources* exit hooks, so
-# this file must never `exit`; everything runs inside one function.
+# this file must never `exit`; everything runs inside functions.
 #
 # The installer's startup runs `dhclient -v` (timeout 10s). When no server
-# answers, dhclient-script runs with reason=FAIL for each interface, and this
-# hook then:
+# answers, dhclient-script runs with reason=FAIL for the first interface that
+# times out, then dhclient goes to the background. So on that first FAIL this
+# hook tries every interface, the reported one first, and for each one:
 #   1. skips interfaces without link, or that already have an IPv4 address;
 #   2. picks an address from the bootstrap range, starting at a slot derived
 #      from the NIC's MAC so several machines booting at once spread out;
@@ -50,7 +51,7 @@ bootstrap_hook_text() {
 
 autopve_bootstrap() {
     local conf=/etc/autopve-bootstrap.conf done=/run/autopve-bootstrap.done log=/run/autopve-bootstrap.log
-    local range prefix gateway dns start end n mac slot k ip cand arp
+    local range prefix gateway dns start end arp
 
     # shellcheck disable=SC2154 # $reason and $interface are set by dhclient-script
     case "$reason" in FAIL|TIMEOUT) ;; *) return 0 ;; esac
@@ -58,15 +59,6 @@ autopve_bootstrap() {
     [ -e "$done" ] && return 0
 
     autopve_say() { echo "autopve bootstrap: $*" >&2; echo "$*" >>"$log"; }
-
-    if [ "$(cat "/sys/class/net/$interface/carrier" 2>/dev/null)" != 1 ]; then
-        autopve_say "$interface: no link, skipped"
-        return 0
-    fi
-    if ip -4 -o addr show dev "$interface" 2>/dev/null | grep -q ' inet '; then
-        autopve_say "$interface: already has an IPv4 address, skipped"
-        return 0
-    fi
 
     range=$(sed -n 's/^range=//p' "$conf"); prefix=$(sed -n 's/^prefix=//p' "$conf")
     gateway=$(sed -n 's/^gateway=//p' "$conf"); dns=$(sed -n 's/^dns=//p' "$conf")
@@ -82,40 +74,64 @@ autopve_bootstrap() {
     else autopve_say "no arping (nor busybox arping) in the installer, cannot probe addresses"; return 0
     fi
 
-    n=$((end - start + 1))
-    mac=$(cat "/sys/class/net/$interface/address" 2>/dev/null)
-    slot=$(( $(printf '%s' "$mac" | cksum | cut -d' ' -f1) % n ))
-    ip link set dev "$interface" up
+    # dhclient reports FAIL for the first interface that times out and then
+    # goes to the background; the installer carries on before the others are
+    # reported. So try every interface with link now, this one first.
+    local ifc p
+    for ifc in "$interface" $(for p in /sys/class/net/*; do p=${p##*/}; [ "$p" = lo ] || [ "$p" = "$interface" ] || echo "$p"; done); do
+        autopve_try "$ifc" && return 0
+    done
+    autopve_say "no interface with link reached gateway $gateway; no bootstrap address set"
+    return 0
+}
 
-    autopve_say "$interface ($mac): no DHCP answer, trying $range"
+# Try one interface; 0 when it now has a bootstrap address. Reads range,
+# prefix, gateway, dns, start, end, arp and log from autopve_bootstrap.
+autopve_try() {
+    local ifc="$1" n mac slot k ip cand
+    if [ "$(cat "/sys/class/net/$ifc/carrier" 2>/dev/null)" != 1 ]; then
+        autopve_say "$ifc: no link, skipped"
+        return 1
+    fi
+    if ip -4 -o addr show dev "$ifc" 2>/dev/null | grep -q ' inet '; then
+        autopve_say "$ifc: already has an IPv4 address, skipped"
+        return 1
+    fi
+
+    n=$((end - start + 1))
+    mac=$(cat "/sys/class/net/$ifc/address" 2>/dev/null)
+    slot=$(( $(printf '%s' "$mac" | cksum | cut -d' ' -f1) % n ))
+    ip link set dev "$ifc" up
+
+    autopve_say "$ifc ($mac): no DHCP answer, trying $range"
     k=0
     while [ "$k" -lt "$n" ]; do
         cand=$(autopve_int2ip $((start + (slot + k) % n)))
         k=$((k + 1))
         # -D: exit status 0 only when nobody answers for this address.
-        if ! $arp -D -q -c 2 -w 3 -I "$interface" "$cand" >/dev/null 2>&1; then
+        if ! $arp -D -q -c 2 -w 3 -I "$ifc" "$cand" >/dev/null 2>&1; then
             autopve_say "$cand is in use, next"
             continue
         fi
-        ip -4 addr add "$cand/$prefix" dev "$interface" || continue
-        if ! $arp -q -c 2 -w 3 -I "$interface" -s "$cand" "$gateway" >/dev/null 2>&1; then
-            autopve_say "$interface: gateway $gateway does not answer, not the provisioning network"
-            ip -4 addr del "$cand/$prefix" dev "$interface" 2>/dev/null
-            return 0
+        ip -4 addr add "$cand/$prefix" dev "$ifc" || continue
+        if ! $arp -q -c 2 -w 3 -I "$ifc" -s "$cand" "$gateway" >/dev/null 2>&1; then
+            autopve_say "$ifc: gateway $gateway does not answer, not the provisioning network"
+            ip -4 addr del "$cand/$prefix" dev "$ifc" 2>/dev/null
+            return 1
         fi
-        ip -4 route replace default via "$gateway" dev "$interface"
+        ip -4 route replace default via "$gateway" dev "$ifc"
         if [ -n "$dns" ]; then
             : >/etc/resolv.conf.autopve
             for ip in $dns; do echo "nameserver $ip" >>/etc/resolv.conf.autopve; done
             cat /etc/resolv.conf.autopve >"$(readlink -f /etc/resolv.conf 2>/dev/null || echo /etc/resolv.conf)"
             rm -f /etc/resolv.conf.autopve
         fi
-        echo "$interface $cand/$prefix via $gateway" >"$done"
-        autopve_say "$interface: using $cand/$prefix via $gateway${dns:+, dns $dns}"
+        echo "$ifc $cand/$prefix via $gateway" >"$done"
+        autopve_say "$ifc: using $cand/$prefix via $gateway${dns:+, dns $dns}"
         return 0
     done
-    autopve_say "$interface: every address in $range is in use"
-    return 0
+    autopve_say "$ifc: every address in $range is in use"
+    return 1
 }
 
 autopve_ip2int() {
