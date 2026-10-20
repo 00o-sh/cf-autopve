@@ -7,7 +7,7 @@
 import type { Env } from "./env";
 import { bool, num } from "./env";
 import { requireIdentity, type Identity } from "./access";
-import { audit, trimHistory } from "./db";
+import { audit, trimHistory, trimSysinfoKeys } from "./db";
 import {
   decryptDoc, DEFAULT_NAME, deleteAnswer, docHasSecrets, ensureDefaultAnswer, evaluateRules, getAnswer, lintMerged, listAnswers, MASK_MARKER, maskDoc, MATCH_FIELD_SUGGESTIONS, mergeDocs, normaliseDoc, saveAnswer, secretKeysIn, selectAnswer, validateName, ValidationError,
   type AnswerRecord, type ServeMode, type MatchRule,
@@ -418,6 +418,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
 
   if (head === "maintenance" && method === "POST") {
     await trimHistory(env);
+    await trimSysinfoKeys(env);
     return json({ ok: true });
   }
 
