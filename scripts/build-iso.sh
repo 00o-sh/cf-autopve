@@ -50,7 +50,7 @@ bootstrap_hook_text() {
 
 autopve_bootstrap() {
     local conf=/etc/autopve-bootstrap.conf done=/run/autopve-bootstrap.done log=/run/autopve-bootstrap.log
-    local range prefix gateway dns start end n mac slot k ip cand
+    local range prefix gateway dns start end n mac slot k ip cand arp
 
     # shellcheck disable=SC2154 # $reason and $interface are set by dhclient-script
     case "$reason" in FAIL|TIMEOUT) ;; *) return 0 ;; esac
@@ -76,6 +76,12 @@ autopve_bootstrap() {
     autopve_ip2int "$gateway" >/dev/null || { autopve_say "bad gateway '$gateway'"; return 0; }
     [ "$end" -ge "$start" ] || { autopve_say "range end is before its start"; return 0; }
 
+    # The PVE 9.x installer has no arping binary, only busybox's applet.
+    if command -v arping >/dev/null 2>&1; then arp=arping
+    elif command -v busybox >/dev/null 2>&1 && busybox arping -h 2>&1 | grep -q -- '-D'; then arp="busybox arping"
+    else autopve_say "no arping (nor busybox arping) in the installer, cannot probe addresses"; return 0
+    fi
+
     n=$((end - start + 1))
     mac=$(cat "/sys/class/net/$interface/address" 2>/dev/null)
     slot=$(( $(printf '%s' "$mac" | cksum | cut -d' ' -f1) % n ))
@@ -87,12 +93,12 @@ autopve_bootstrap() {
         cand=$(autopve_int2ip $((start + (slot + k) % n)))
         k=$((k + 1))
         # -D: exit status 0 only when nobody answers for this address.
-        if ! arping -D -q -c 2 -w 3 -I "$interface" "$cand" >/dev/null 2>&1; then
+        if ! $arp -D -q -c 2 -w 3 -I "$interface" "$cand" >/dev/null 2>&1; then
             autopve_say "$cand is in use, next"
             continue
         fi
         ip -4 addr add "$cand/$prefix" dev "$interface" || continue
-        if ! arping -q -c 2 -w 3 -I "$interface" -s "$cand" "$gateway" >/dev/null 2>&1; then
+        if ! $arp -q -c 2 -w 3 -I "$interface" -s "$cand" "$gateway" >/dev/null 2>&1; then
             autopve_say "$interface: gateway $gateway does not answer, not the provisioning network"
             ip -4 addr del "$cand/$prefix" dev "$interface" 2>/dev/null
             return 0
