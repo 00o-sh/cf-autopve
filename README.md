@@ -596,6 +596,9 @@ url = "https://autopve.example.com/files/first-boot.sh"
 
 Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the optional R2 binding in
 `wrangler.toml`. Same exposure rule as answers: whatever is here is readable by whoever can reach the URL.
+Files are served with `Content-Security-Policy: sandbox; default-src 'none'` and `nosniff`, and HTML,
+SVG, XML and JavaScript are sent as `Content-Disposition: attachment`, so nothing hosted here runs on
+the configurator's origin.
 
 ## Configuration reference
 

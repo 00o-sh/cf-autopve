@@ -157,13 +157,16 @@ test("JSON for installers that ask for it, TOML otherwise", async () => {
 });
 
 test("each client IP is rate limited", async () => {
-  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", RATE_LIMIT_PER_MIN: "2" });
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", RATE_LIMIT_PER_MIN: "2", SERVE_TOKEN: TOKEN });
   try {
     await w.api("/bootstrap");
     const codes = [];
     for (let i = 0; i < 3; i++) codes.push((await w.installer(SYSINFO)).status);
     assert.deepEqual(codes.slice(2), [429]);
     assert.notEqual((await w.installer(SYSINFO, { "CF-Connecting-IP": "192.0.2.99" })).status, 429, "another client is unaffected");
+    const guesses = [];
+    for (let i = 0; i < 3; i++) guesses.push((await w.fetch("/files/x.sh?t=guess", { headers: { "CF-Connecting-IP": "192.0.2.50" } })).status);
+    assert.deepEqual(guesses, [403, 403, 429], "wrong-token guesses at /files count against the limit");
   } finally { await w.close(); }
 });
 
@@ -234,6 +237,18 @@ test("hosted files need the serve token, and uploads that look like they hold a 
     const got = await w.fetch(`/files/first-boot.sh?t=${TOKEN}`);
     assert.equal(got.status, 200);
     assert.equal(await got.text(), script);
+    assert.equal(got.headers.get("Content-Security-Policy"), "sandbox; default-src 'none'");
+    assert.equal(got.headers.get("X-Content-Type-Options"), "nosniff");
+    assert.equal(got.headers.get("Content-Disposition"), null, "a script is served inline for the installer");
+    await w.fetch("/api/files/page.html", {
+      method: "POST", body: "<script>fetch('/api/answers')</script>",
+      headers: { "Content-Type": "application/octet-stream", "X-File-Type": "text/html", Origin: ORIGIN, "Sec-Fetch-Site": "same-origin" },
+    });
+    const page = await w.fetch(`/files/page.html?t=${TOKEN}`);
+    assert.equal(page.headers.get("Content-Disposition"), "attachment", "active content is never rendered on this origin");
+    assert.equal(page.headers.get("Content-Security-Policy"), "sandbox; default-src 'none'");
+    assert.equal((await w.fetch(`/files/%E0%A4%A?t=${TOKEN}`)).status, 404, "a malformed escape is not found, not a 500");
+    assert.equal((await w.fetch("/hook/%E0%A4%A", { method: "POST", body: "{}" })).status, 404);
     const leaky = await w.fetch("/api/files/leaky.sh", {
       method: "POST", body: "#!/bin/sh\nexport API_TOKEN=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\n",
       headers: { "Content-Type": "application/octet-stream", Origin: ORIGIN, "Sec-Fetch-Site": "same-origin" },
