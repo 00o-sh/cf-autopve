@@ -211,3 +211,60 @@ test("hosted files need the serve token, and uploads that look like they hold a 
     assert.ok((await leaky.json()).warnings.length > 0, "a credential in a hosted file is called out");
   } finally { await w.close(); }
 });
+
+/** Poll until `check` holds: history and key writes run in waitUntil, after the response. */
+async function eventually(check) {
+  for (let i = 0; i < 100; i++) {
+    if (await check()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.fail("condition not reached");
+}
+
+const count = async (w, table) => (await w.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first()).n;
+
+test("unauthenticated refusals leave a bounded history with short excerpts and no learned keys", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", SERVE_TOKEN: TOKEN, HISTORY_LIMIT: "5", RATE_LIMIT_PER_MIN: "0" });
+  try {
+    await w.api("/bootstrap");
+    const big = { ...SYSINFO, pad: "x".repeat(200000) };
+    for (let i = 0; i < 300; i++) big[`k${i}`] = `v${i}`;
+    for (let i = 0; i < 50; i++) assert.equal((await w.installer(big)).status, 403);
+    await eventually(async () => (await count(w, "history")) <= 5 + 24);
+    const rows = (await w.db.prepare("SELECT outcome, LENGTH(system_info) AS len FROM history").all()).results;
+    assert.ok(rows.every((r) => r.outcome === "denied" && r.len <= 2048), "only a short excerpt is kept");
+    assert.equal(await count(w, "sysinfo_keys"), 0);
+  } finally { await w.close(); }
+});
+
+test("refusals of a token holder still learn keys, capped in length, and maintenance bounds the key table", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", SERVE_TOKEN: TOKEN });
+  try {
+    await w.api("/bootstrap");
+    await w.api("/answers/Default", "PUT", { doc: { ...NODE1, global: { ...NODE1.global, "root-password": undefined }, must_contain: [] }, settings: { serve_mode: "off" } });
+    assert.equal((await w.installer({ ...SYSINFO, long: "y".repeat(1000) }, BEARER)).status, 403);
+    await eventually(async () => (await count(w, "sysinfo_keys")) > 0);
+    const keys = (await w.db.prepare("SELECT k FROM sysinfo_keys").all()).results.map((r) => r.k);
+    assert.ok(keys.includes('"name":"RS700-E11"'));
+    assert.ok(keys.every((k) => k.length <= 256), "an oversized key is not learned");
+
+    const insert = w.db.prepare("INSERT INTO sysinfo_keys (k, last_seen) VALUES (?, ?)");
+    await w.db.batch(Array.from({ length: 2100 }, (_, i) => insert.bind(`"filler":"${i}"`, i)));
+    await w.api("/maintenance", "POST", {});
+    assert.equal(await count(w, "sysinfo_keys"), 2000);
+    assert.ok(await w.db.prepare(`SELECT 1 FROM sysinfo_keys WHERE k = '"name":"RS700-E11"'`).first(), "the newest keys are kept");
+  } finally { await w.close(); }
+});
+
+test("IPv6 clients share one rate-limit budget per /64", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", RATE_LIMIT_PER_MIN: "2" });
+  try {
+    await w.api("/bootstrap");
+    const codes = [];
+    for (const ip of ["2001:db8:1:2::1", "2001:db8:1:2:ffff::5", "2001:0db8:0001:0002::9"]) {
+      codes.push((await w.installer(SYSINFO, { "CF-Connecting-IP": ip })).status);
+    }
+    assert.equal(codes[2], 429, "a third address in the same /64 is over the limit");
+    assert.notEqual((await w.installer(SYSINFO, { "CF-Connecting-IP": "2001:db8:1:3::1" })).status, 429, "another /64 is unaffected");
+  } finally { await w.close(); }
+});
