@@ -93,6 +93,8 @@ If you do host:
    `REDACTED-BY-AUTOPVE`; the UI preview is redacted too. Revealing or downloading the real values is a
    deliberate action and lands in the audit log with the Access identity that did it.
 7. **Denials are recorded.** A refused fetch is written to history with its reason, so probing is visible.
+   While `SERVE_TOKEN` is set, a refusal of a caller without it keeps only the first 2 KiB of its system
+   information and adds nothing to the filter editor's key suggestions.
 8. **Uploaded files are scanned.** A first-boot script containing something that looks like a password or
    a private key is flagged at upload, because `/files/*` is as public as `/answer`.
 9. **No cross-site writes.** The configurator API is authenticated by the Access cookie, which a
@@ -609,7 +611,7 @@ Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the opt
 | `ARM_DEFAULT_MINUTES` | `30` | default length of an arm window |
 | `REQUIRE_HTTPS` | `true` | refuse to serve credentials over plain HTTP |
 | `ALLOW_ALWAYS_SECRETS` | `false` | permit `serve_mode = "always"` on credential-bearing answers |
-| `RATE_LIMIT_PER_MIN` | `30` | per-IP limit on `/answer`, `/hook`, `/files` |
+| `RATE_LIMIT_PER_MIN` | `30` | per-IP limit on `/answer`, `/hook`, `/files` (IPv6 counted per /64) |
 | `FILE_MAX_BYTES` | `1000000` | largest file stored in D1 (D1's hard row limit is 2 MB) |
 | `HISTORY_MAX_BYTES` | `131072` | cap on stored `system_info` per history row |
 | `HISTORY_LIMIT` | `1000` | history rows retained |

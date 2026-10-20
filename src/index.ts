@@ -24,6 +24,8 @@ import { emitJson, emitToml, prefersJson } from "./toml";
 import { trackAnswer, trackInstalled } from "./installs";
 
 const TEXT = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" };
+/** What a refused caller without the serve token leaves in history: enough to see the probe. */
+const UNAUTHENTICATED_INFO_BYTES = 2048;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -87,7 +89,7 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
     return new Response("rate limit exceeded\n", { status: 429, headers: TEXT });
   }
 
-  const rawBody = (await request.text()).slice(0, num(env.HISTORY_MAX_BYTES, 131072) * 4);
+  const rawBody = await readText(request, num(env.HISTORY_MAX_BYTES, 131072) * 4);
   let systemInfo: any = {};
   try {
     systemInfo = rawBody ? JSON.parse(rawBody) : {};
@@ -101,19 +103,23 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
     return new Response("no answers are configured on this deployment\n", { status: 404, headers: TEXT });
   }
   const record = selection.record;
+  // True when SERVE_TOKEN is unset: then every caller is as trusted as today.
+  const authorized = tokenOk(env, request, pathToken);
   const refuse = (reason: string): Response => {
     ctx.waitUntil(
       (async () => {
-        await addHistory(env, {
+        // Anyone can POST a made-up machine to /answer: without the token it
+        // gets a short history excerpt and no key-index or dashboard rows.
+        const id = await addHistory(env, {
           ts: Date.now(), kind: "answer", answer: record.name, system_name: systemName(systemInfo),
-          ip, outcome: "denied", detail: reason, response: "", system_info: systemInfoRaw,
+          ip, outcome: "denied", detail: reason, response: "",
+          system_info: authorized ? systemInfoRaw : systemInfoRaw.slice(0, UNAUTHENTICATED_INFO_BYTES),
         });
-        await recordSysinfoKeys(env, systemInfoRaw);
-        // Only a caller holding the token gets a dashboard row: anyone can POST
-        // a made-up machine to /answer, and that must not fill the table.
-        if (env.SERVE_TOKEN && tokenOk(env, request, pathToken)) {
+        if (authorized) await recordSysinfoKeys(env, systemInfoRaw);
+        if (env.SERVE_TOKEN && authorized) {
           await trackAnswer(env, systemInfo, { answer: record.name, status: "refused", detail: reason, ip, systemName: systemName(systemInfo) });
         }
+        if (id % 25 === 0) await trimHistory(env);
       })(),
     );
     return new Response(`refused: ${reason}\n`, { status: 403, headers: TEXT });
@@ -177,7 +183,7 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
   if (!env.SERVE_TOKEN) return new Response(`refused: ${hookAllowed(env, request, pathToken).reason}\n`, { status: 403, headers: TEXT });
   if (await rateLimited(env, ip, "hook")) return new Response("rate limit exceeded\n", { status: 429, headers: TEXT });
 
-  let rawBody = (await request.text()).slice(0, 512 * 1024);
+  let rawBody = await readText(request, 512 * 1024);
   let payload: any = {};
   try {
     payload = rawBody ? JSON.parse(rawBody) : {};
@@ -203,12 +209,13 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
   if (!name) {
     // No relay: the webhook only marks the machine installed.
     ctx.waitUntil((async () => {
-      await addHistory(env, {
+      const id = await addHistory(env, {
         ts: Date.now(), kind: "hook", answer: null, system_name: systemName(payload), ip,
         outcome: "recorded", detail: "install reported", response: "", system_info: infoRaw,
       });
       await recordSysinfoKeys(env, infoRaw);
       await track();
+      if (id % 25 === 0) await trimHistory(env);
     })());
     return new Response("accepted\n", { status: 202, headers: TEXT });
   }
@@ -226,6 +233,7 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
   ctx.waitUntil((async () => {
     await recordSysinfoKeys(env, infoRaw);
     await track();
+    if (id % 25 === 0) await trimHistory(env);
   })());
 
   if (queueable) {
@@ -249,6 +257,29 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
 
   // The installer only needs to know we took the payload; delivery is async.
   return new Response("accepted\n", { status: 202, headers: TEXT });
+}
+
+/** The body as text, cut at `maxBytes` without buffering the rest of it. */
+async function readText(request: Request, maxBytes: number): Promise<string> {
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (size < maxBytes) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    size += value.byteLength;
+  }
+  if (size >= maxBytes) await reader.cancel().catch(() => {});
+  const bytes = new Uint8Array(Math.min(size, maxBytes));
+  let offset = 0;
+  for (const chunk of chunks) {
+    const part = chunk.subarray(0, bytes.length - offset);
+    bytes.set(part, offset);
+    offset += part.length;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 async function handleFile(request: Request, env: Env, path: string): Promise<Response> {
