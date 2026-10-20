@@ -766,7 +766,7 @@ function renderServing() {
     wrap.append(el("div", { class: "card", style: "border-color: var(--warn)" }, [
       el("h3", {}, [el("span", { text: "This answer hosts credentials" }), el("span", { class: "tag", text: "risk" })]),
       el("p", { text: "These fields are stored encrypted, but the installer has no way to authenticate: while this answer is being served, anything that can reach the answer endpoint can read them in plaintext." }),
-      el("ul", { html: a.secret_keys.map((k) => `<li><code>${k}</code></li>`).join("") }),
+      el("ul", {}, a.secret_keys.map((k) => el("li", {}, [el("code", { text: k })]))),
       el("p", { class: "muted", text: "Safer patterns: use root-password-hashed instead of root-password; keep the answer disarmed except during an install; restrict by source IP; or skip hosting entirely and bake the downloaded answer.toml into the ISO with proxmox-auto-install-assistant." }),
     ]));
   }
