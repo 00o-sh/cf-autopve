@@ -667,12 +667,23 @@ test("the stock Default answer is flagged for its missing root password", () => 
 test("the JSON answer is exactly what a TOML parser reads from the TOML answer", () => {
   const doc = A.parseAnswerToml(UPSTREAM_EXAMPLE).doc;
   const toml = A.emitToml(doc);
-  assert.deepEqual(A.emitJson(doc), JSON.parse(JSON.stringify(A.parseTomlRaw(toml))));
-  const json = A.emitJson(doc);
+  const json = JSON.parse(JSON.stringify(A.emitJson(doc))); // as served; emitJson builds null-prototype objects
+  assert.deepEqual(json, JSON.parse(JSON.stringify(A.parseTomlRaw(toml))));
   assert.equal(json["disk-setup"].zfs.raid, "raid1");
   assert.equal(json["disk-setup"].filter.ID_SERIAL, "KIOXIA*");
   assert.deepEqual(json.network["interface-name-pinning"], { enabled: true, mapping: { "24:8a:07:1e:05:bc": "lan0" } });
   assert.ok(!("comments" in json) && !("must_contain" in json));
+});
+
+test("a key segment like __proto__ never reaches Object.prototype", () => {
+  for (const key of ["__proto__.POLLUTED", "constructor.prototype.POLLUTED", "x.__proto__"]) {
+    assert.throws(() => A.emitJson({ global: { keyboard: "de", [key]: "true" } }), /not allowed/, key);
+  }
+  assert.equal({}.POLLUTED, undefined);
+  assert.equal(Object.prototype.POLLUTED, undefined);
+  assert.throws(() => A.parseAnswerToml('[global]\nkeyboard = "de"\n"__proto__".X = "1"\n'), A.ValidationError);
+  assert.throws(() => A.normaliseDoc({ global: { keyboard: "de", "constructor.prototype.X": "1" } }), /constructor\.prototype\.X/);
+  assert.deepEqual(A.fieldValues({ dmi: {} }, "dmi.constructor.name"), [], "field paths read own properties only");
 });
 
 test("JSON only when the client prefers it", () => {

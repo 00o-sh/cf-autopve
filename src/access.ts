@@ -69,12 +69,32 @@ function tokenFrom(request: Request): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+function hostnameOf(host: string): string {
+  try {
+    return new URL(`http://${host}`).hostname;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Whether both the URL and the Host header name a loopback host. A page that
+ * rebinds its own DNS name to 127.0.0.1 still sends its own name in Host.
+ */
+function isLoopback(request: Request): boolean {
+  const host = request.headers.get("Host");
+  return LOOPBACK.has(new URL(request.url).hostname) && (host === null || LOOPBACK.has(hostnameOf(host)));
+}
+
 /**
  * Verify the Access assertion on a request. Throws AccessError when the
  * request must not be served.
  */
 export async function requireIdentity(request: Request, env: Env): Promise<Identity> {
-  if (env.DEV_ALLOW_INSECURE_UI === "true") {
+  // Own property only: an inherited value would mean Object.prototype was polluted.
+  if (Object.hasOwn(env, "DEV_ALLOW_INSECURE_UI") && env.DEV_ALLOW_INSECURE_UI === "true" && isLoopback(request)) {
     return { email: "dev@localhost", sub: "dev", dev: true };
   }
   if (!teamDomain(env) || !env.ACCESS_AUD || env.ACCESS_AUD.startsWith("REPLACE_")) {

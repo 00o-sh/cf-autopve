@@ -15,6 +15,12 @@ export type TomlValue = string | number | boolean | Array<string | number | bool
 export type AnswerDoc = Record<string, any>;
 
 const BARE_KEY = /^[A-Za-z0-9_-]+$/;
+const UNSAFE_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** The first dot-separated segment of `key` that could reach Object.prototype when walked, if any. */
+export function unsafeSegment(key: string): string | undefined {
+  return key.split(".").find((seg) => UNSAFE_SEGMENTS.has(seg));
+}
 
 export function encodeKey(key: string): string {
   return key
@@ -84,11 +90,14 @@ export function emitToml(doc: AnswerDoc, opts: EmitOptions = {}): string {
  * document that should be redacted.
  */
 export function emitJson(doc: AnswerDoc): Record<string, unknown> {
-  const out: Record<string, any> = {};
+  // Null-prototype objects and own-property reads: a key segment like
+  // `__proto__` must stay a plain key, never a path into Object.prototype.
+  const out: Record<string, any> = Object.create(null);
   const descend = (root: Record<string, any>, path: string[]) => {
     let cur = root;
     for (const seg of path) {
-      if (!cur[seg] || typeof cur[seg] !== "object" || Array.isArray(cur[seg])) cur[seg] = {};
+      const next = Object.hasOwn(cur, seg) ? cur[seg] : undefined;
+      if (!next || typeof next !== "object" || Array.isArray(next)) cur[seg] = Object.create(null);
       cur = cur[seg];
     }
     return cur;
@@ -100,6 +109,8 @@ export function emitJson(doc: AnswerDoc): Record<string, unknown> {
     if (entries.length === 0 && PRUNE_WHEN_EMPTY.includes(section)) continue;
     const target = descend(out, section.split("."));
     for (const [key, value] of entries) {
+      const bad = unsafeSegment(key);
+      if (bad) throw new Error(`${section}.${key}: "${bad}" is not allowed in an answer key`);
       const path = key.split(".");
       descend(target, path.slice(0, -1))[path[path.length - 1]] = value;
     }
