@@ -196,6 +196,22 @@ read_secret() {
   printf '\n' >/dev/tty
   printf -v "$1" "%s" "$value"
 }
+# need_tools WHY CMD...: make sure each command exists. Missing ones are
+# offered for install with apt (each command's package has the same name).
+need_tools() {
+  local why="$1" missing=() t reply="" sudo=()
+  shift
+  for t in "$@"; do command -v "$t" >/dev/null || missing+=("$t"); done
+  [ "${#missing[@]}" -gt 0 ] || return 0
+  local hint="${why} needs ${missing[*]}: sudo apt install ${missing[*]}"
+  if ! command -v apt-get >/dev/null || ! ( : </dev/tty ) 2>/dev/null; then die "$hint"; fi
+  [ "$(id -u)" -eq 0 ] || sudo=(sudo)
+  read -r -p "==> ${why} needs ${missing[*]}. Install with ${sudo[*]:+${sudo[*]} }apt-get install ${missing[*]}? [Y/n] " reply </dev/tty || reply=n
+  case "$reply" in ""|y|Y|yes|YES|Yes) ;; *) die "$hint" ;; esac
+  # umask 077 would leave the installed files unreadable to other users.
+  ( umask 022 && "${sudo[@]}" apt-get install -y "${missing[@]}" ) >&2 || die "installing ${missing[*]} failed"
+  for t in "${missing[@]}"; do command -v "$t" >/dev/null || die "$t is still missing after the install"; done
+}
 
 usage() {
   cat <<'EOF'
@@ -396,12 +412,12 @@ COPY_WRAP=()
 if [ "$SAFE_COPY" = 1 ]; then
   COPY_WRAP=(strace -f -qq -o /dev/null -e "trace=copy_file_range,sendfile"
              -e inject=copy_file_range:error=ENOSYS -e inject=sendfile:error=ENOSYS)
-  if [ "$RUNNER" = native ]; then
-    command -v strace >/dev/null || die "safe copy (on by default under WSL) needs strace: sudo apt install strace"
-  fi
+  [ "$RUNNER" != native ] || need_tools "safe copy (on by default under WSL)" strace
   say "safe copy on: avoiding in-kernel file copies"
 fi
 export AUTOPVE_SAFE_COPY="$SAFE_COPY"
+# Checked before prepare-iso, so a missing tool does not cost a full build.
+[ -z "$BOOTSTRAP_CONF" ] || [ "$RUNNER" != native ] || need_tools "--bootstrap-range" zstd cpio
 
 # The answer URL and token travel as environment variables so the token is
 # not visible in docker's process list; the container gets them by name only.
@@ -487,7 +503,6 @@ case "$RUNNER" in
       "${FETCH_ARGS[@]}" --output "$OUTPUT" ${FB_ARGS[@]+"${FB_ARGS[@]}"} \
       2>&1 | { grep -v --line-buffered 'arch_set_scno' || true; }
     if [ -n "$BOOTSTRAP_CONF" ]; then
-      for t in zstd cpio; do command -v "$t" >/dev/null || die "--bootstrap-range needs $t: sudo apt install $t"; done
       eval "$INJECT_BOOTSTRAP"
       inject_bootstrap "$OUTPUT" || die "adding the bootstrap network failed"
     fi
