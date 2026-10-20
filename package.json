@@ -5,7 +5,7 @@
   "description": "Proxmox VE automated-installation answer file configurator on Cloudflare Workers",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --host localhost",
     "deploy": "npm run db:migrate && wrangler deploy",
     "deploy:preview": "npm run db:migrate:preview && wrangler preview",
     "db:migrate": "wrangler d1 migrations apply autopve --remote",

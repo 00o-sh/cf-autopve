@@ -183,8 +183,12 @@ npm test                           # logic tests, then the built Worker in worke
                                    # migrated D1: Access gate, serving, relays, files
 ```
 
-`DEV_ALLOW_INSECURE_UI=true` bypasses Access **and says so in a red banner**. Never set it on a
-deployment.
+`DEV_ALLOW_INSECURE_UI=true` bypasses Access **and says so in a red banner**, but only for requests
+to `localhost`, `127.0.0.1` or `[::1]`; any other host still needs an Access token. Never set it on
+a deployment. `npm run dev` passes `--host localhost` because `wrangler dev` otherwise presents
+every request to the Worker as the route's hostname. Wrangler rewrites the host for every request,
+so the Worker cannot tell a DNS-rebinding page from your own browser there: don't keep the dev
+server running with real answers or credentials in the local D1 while you browse untrusted sites.
 
 ### Dependencies
 

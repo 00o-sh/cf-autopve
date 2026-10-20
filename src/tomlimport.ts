@@ -16,7 +16,7 @@
 import { parse, TomlError } from "smol-toml";
 import { ValidationError, normaliseDoc } from "./answers";
 import { keyDef } from "./schema";
-import type { AnswerDoc } from "./toml";
+import { unsafeSegment, type AnswerDoc } from "./toml";
 
 export interface ImportResult {
   doc: AnswerDoc;
@@ -152,6 +152,8 @@ export function parseAnswerToml(text: string): ImportResult {
     const walk = (node: Record<string, unknown>, path: string[]) => {
       for (const [k, v] of Object.entries(node)) {
         const here = [...path, k];
+        const bad = unsafeSegment(here.join("."));
+        if (bad) throw new ValidationError(`${here.join(".")}: "${bad}" is not allowed in a key name.`);
         if (isTable(v)) { walk(v, here); continue; }
         const r = resolve(here);
         const where = here.join(".");

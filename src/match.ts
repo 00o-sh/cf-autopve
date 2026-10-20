@@ -34,7 +34,7 @@ export function fieldValues(info: unknown, field: string): string[] {
     const next: unknown[] = [];
     for (const node of current) {
       if (!node || typeof node !== "object" || Array.isArray(node)) continue;
-      const v = (node as Record<string, unknown>)[key];
+      const v = Object.hasOwn(node, key) ? (node as Record<string, unknown>)[key] : undefined;
       if (v === undefined || v === null) continue;
       if (each) { if (Array.isArray(v)) next.push(...v); }
       else next.push(v);

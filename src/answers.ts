@@ -12,7 +12,7 @@ import { bool } from "./env";
 import { PublicError } from "./errors";
 import { encryptString, decryptString, isEncrypted } from "./crypto";
 import { isSecretKey, SECTION_ORDER, DEFAULT_ANSWER_DOC } from "./schema";
-import { cleanComment, coerceValue, type AnswerDoc } from "./toml";
+import { cleanComment, coerceValue, unsafeSegment, type AnswerDoc } from "./toml";
 import { checkValue } from "./validate";
 import { fieldValues, globToRegExp, MATCH_FIELD_RE } from "./match";
 import { asFleet, checkTemplate, findMachine, hasPlaceholder, normaliseFleet, renderTemplate, type Machine } from "./fleet";
@@ -199,6 +199,11 @@ export function normaliseDoc(input: AnswerDoc): AnswerDoc {
     const clean: Record<string, unknown> = {};
     for (const [key, raw] of Object.entries(table as Record<string, unknown>)) {
       if (raw === undefined || raw === null) continue;
+      const bad = unsafeSegment(key);
+      if (bad) {
+        invalid.push(`${section}.${key} uses "${bad}", which is not allowed in a key name`);
+        continue;
+      }
       if (typeof raw === "string" && isEncrypted(raw)) {
         clean[key] = raw; // already-encrypted value passing back through
         continue;

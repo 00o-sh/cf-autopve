@@ -14,7 +14,8 @@ const root = new URL("../", import.meta.url);
 const compatibilityDate = readFileSync(new URL("wrangler.toml", root), "utf8").match(/^compatibility_date\s*=\s*"([^"]+)"/m)[1];
 const ENC_KEY = "Zm9yLWxvY2FsLWRldi1vbmx5LTMyLWJ5dGUta2V5ISE=";
 const TOKEN = "s3cr3t-serve-token";
-const ORIGIN = "https://autopve.example.com";
+// Loopback: DEV_ALLOW_INSECURE_UI only bypasses Access for localhost requests.
+const ORIGIN = "https://localhost";
 
 /** Statements of a migration file, comments stripped. */
 function statements(sql) {
@@ -131,7 +132,7 @@ test("a credential is stored encrypted, served once inside the arm window, and n
     assert.match(toml, /\[disk-setup\]\nfilesystem = "ext4"/);
 
     assert.match(await (await w.installer(SYSINFO, BEARER)).text(), /used up its allowed number of serves/);
-    assert.equal((await w.installer(SYSINFO, BEARER, "http://autopve.example.com/answer")).status, 403);
+    assert.equal((await w.installer(SYSINFO, BEARER, "http://localhost/answer")).status, 403);
 
     const { history } = await w.api("/history?limit=10");
     assert.deepEqual(history.map((h) => h.outcome).sort(), ["denied", "denied", "denied", "denied", "served"]);
@@ -210,4 +211,42 @@ test("hosted files need the serve token, and uploads that look like they hold a 
     });
     assert.ok((await leaky.json()).warnings.length > 0, "a credential in a hosted file is called out");
   } finally { await w.close(); }
+});
+
+test("the dev bypass answers loopback hosts only, so a DNS-rebinding page gets the Access check", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true" });
+  try {
+    assert.equal((await w.fetch("/api/bootstrap")).status, 200);
+    assert.equal((await w.fetch("http://127.0.0.1:8787/api/bootstrap")).status, 200);
+    assert.equal((await w.fetch("http://rebind.attacker.test:8787/api/bootstrap")).status, 401);
+    assert.equal((await w.fetch("http://rebind.attacker.test/")).status, 401, "the UI too");
+  } finally { await w.close(); }
+});
+
+test("answer keys that walk into Object.prototype are refused, and a stored one cannot open /api", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true" });
+  try {
+    await w.api("/bootstrap");
+    for (const key of ["__proto__.DEV_ALLOW_INSECURE_UI", "constructor.prototype.x", "zfs.prototype"]) {
+      const doc = { ...NODE1, global: { ...NODE1.global, "root-password": undefined, [key]: "true" }, must_contain: [] };
+      await assert.rejects(w.api("/answers/node1", "PUT", { doc, settings: {} }), (err) => err.status === 400 && err.message.includes(key));
+    }
+    await assert.rejects(w.api("/toml/parse", "POST", { toml: '[global]\nkeyboard = "de"\n"__proto__".X = "1"\n' }), (err) => err.status === 400);
+  } finally { await w.close(); }
+
+  // The finding's chain, with the key planted in D1 as if saved before the save-time check existed.
+  const p = await start();
+  try {
+    const doc = {
+      global: { keyboard: "de", country: "at", fqdn: "n1.lab.example", mailto: "root@lab.example", timezone: "Europe/Vienna", "__proto__.DEV_ALLOW_INSECURE_UI": "{{flag}}" },
+      network: { source: "from-dhcp" },
+      "disk-setup": { filesystem: "ext4", "disk-list": ["sda"] },
+      fleet: { field: "network_interfaces[].mac", columns: ["mac", "flag"], rows: [["24:8a:07:1e:05:bc", "true"]] },
+    };
+    await p.db.prepare("INSERT INTO answers (name, doc, serve_mode, created_at, updated_at) VALUES ('Default', ?, 'always', 0, 0)").bind(JSON.stringify(doc)).run();
+    assert.equal((await p.fetch("/api/answers")).status, 401);
+    assert.notEqual((await p.installer(SYSINFO, { Accept: "application/json" })).status, 200, "the JSON answer is refused");
+    assert.equal((await p.fetch("/api/answers")).status, 401);
+    assert.equal((await p.fetch("/api/bootstrap")).status, 401);
+  } finally { await p.close(); }
 });
