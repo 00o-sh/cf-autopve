@@ -993,6 +993,14 @@ test("relay targets on the LAN are rejected with an explanation", () => {
   assert.throws(() => A.validateRelayUrl("http://localhost:8080/hook"), /Cloudflare Tunnel/);
   assert.throws(() => A.validateRelayUrl("ftp://example.com"), /http or https/);
   assert.equal(A.validateRelayUrl("https://automation.example.com/h"), "https://automation.example.com/h");
+  for (const host of [
+    "localhost.", "foo.localhost", "2130706433", "127.1", "0x7f.0.0.1", "0.1.2.3", "100.64.0.1", "100.127.255.254",
+    "[::]", "[::1]", "[::ffff:127.0.0.1]", "[::ffff:7f00:1]", "[::ffff:10.0.0.1]", "[::ffff:a9fe:a9fe]",
+    "[fd00::1]", "[fc00::1]", "[fe80::1]", "172.31.0.1", "169.254.169.254",
+  ]) assert.throws(() => A.validateRelayUrl(`http://${host}/hook`), /Cloudflare Tunnel/, host);
+  for (const host of ["100.128.0.1", "8.8.8.8", "[2606:4700::1111]", "[::ffff:8.8.8.8]", "[2001:db8::fd00]"]) {
+    assert.doesNotThrow(() => A.validateRelayUrl(`http://${host}/hook`), host);
+  }
 });
 
 test("signatures are stable and token comparison is length-safe", async () => {

@@ -23,9 +23,10 @@ function statements(sql) {
 
 /**
  * Start the Worker with `vars`. Returns helpers bound to it; call close() when
- * done. `outbound` collects every request the Worker makes to the internet.
+ * done. `outbound` collects every request the Worker makes to the internet;
+ * `respond` answers them.
  */
-async function start(vars = {}) {
+async function start(vars = {}, respond = () => new Response("ok")) {
   const outbound = [];
   const mf = new Miniflare(convertV4MiniflareOptions({
     modules: true,
@@ -36,7 +37,7 @@ async function start(vars = {}) {
     bindings: { ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com", ACCESS_AUD: "test-aud", ...vars },
     outboundService: async (req) => {
       outbound.push({ url: req.url, method: req.method, headers: Object.fromEntries(req.headers), body: await req.text() });
-      return new Response("ok");
+      return respond(req);
     },
   }));
   let db;
@@ -187,6 +188,35 @@ test("a webhook is relayed signed, without the serve token, to the configured ta
     const { createHmac } = await import("node:crypto");
     const expect = createHmac("sha256", "relay-hmac").update(`${sent.headers["x-autopve-timestamp"]}.${sent.body}`).digest("hex");
     assert.equal(sent.headers["x-autopve-signature"], `sha256=${expect}`, "the receiver can verify it");
+  } finally { await w.close(); }
+});
+
+test("a relay target's redirect is not followed, so its credentials go nowhere else", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", ANSWER_ENC_KEY: ENC_KEY, SERVE_TOKEN: TOKEN },
+    () => new Response(null, { status: 307, headers: { Location: "https://elsewhere.example.net/steal" } }));
+  try {
+    await w.api("/relays/deploy", "PUT", { url: "https://automation.example.com/hook", headers: { "X-Api-Key": "k-123" }, hmac_secret: "h", retries: 0 });
+    const { result } = await w.api("/relays/deploy/test", "POST", {});
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 307);
+    assert.match(result.error, /redirects are not followed/);
+    assert.deepEqual(w.outbound.map((r) => r.url), ["https://automation.example.com/hook"]);
+  } finally { await w.close(); }
+});
+
+test("changing a relay's URL drops its stored credentials instead of sending them to the new target", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", ANSWER_ENC_KEY: ENC_KEY });
+  try {
+    const { relay } = await w.api("/relays/deploy", "PUT", { url: "https://a.example.com/h", headers: { "X-Api-Key": "k-123" }, hmac_secret: "h" });
+    const masked = { headers: relay.headers, hmac_secret: relay.hmac_secret };
+    // Same URL: masked values keep what is stored.
+    assert.deepEqual(Object.keys((await w.api("/relays/deploy", "PUT", { url: "https://a.example.com/h", ...masked })).relay.headers), ["X-Api-Key"]);
+    await assert.rejects(w.api("/relays/deploy", "PUT", { url: "https://b.example.com/h", ...masked }), /URL changed.*Re-enter/);
+    await assert.rejects(w.api("/relays/deploy", "PUT", { url: "https://b.example.com/h", hmac_secret: masked.hmac_secret }), /URL changed/);
+    // Omitting the headers on a retarget does not carry the stored ones over either.
+    const moved = (await w.api("/relays/deploy", "PUT", { url: "https://b.example.com/h" })).relay;
+    assert.deepEqual(moved.headers, {});
+    assert.equal(moved.hmac_secret, "");
   } finally { await w.close(); }
 });
 

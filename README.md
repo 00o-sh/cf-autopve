@@ -546,8 +546,13 @@ if not hmac.compare_digest(expected, sig.removeprefix("sha256=")) or abs(time.ti
     abort(401)
 ```
 
+Changing a relay's URL drops its stored header values and signing secret: re-enter them for the new
+target, so credentials entered for one receiver are never sent to another.
+
 The target must be reachable from Cloudflare's network; a LAN address is rejected with an explanation.
-Put a Cloudflare Tunnel in front of an internal runner if that is where the work happens.
+Put a Cloudflare Tunnel in front of an internal runner if that is where the work happens. Redirects are
+not followed (they would re-send the headers and signature to wherever `Location` points): a `3xx`
+counts as a failed delivery, so set the relay URL to the final target.
 
 ### Install tracking
 
