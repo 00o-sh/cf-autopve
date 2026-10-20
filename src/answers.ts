@@ -357,10 +357,14 @@ export async function saveAnswer(
 ): Promise<AnswerRecord> {
   const existing = await getAnswer(env, name);
   const normalised = normaliseDoc(unmaskDoc(doc, existing?.doc ?? {}));
-  const hasSecrets = docHasSecrets(normalised);
+  const def = name === DEFAULT_NAME ? null : await getAnswer(env, DEFAULT_NAME);
+  // The installer receives Default merged with this answer, credentials included.
+  const hasSecrets = docHasSecrets(def ? mergeDocs(def.doc, normalised) : normalised);
   const secretsAck = settings.secrets_ack ?? existing?.secrets_ack ?? false;
 
-  if (hasSecrets && !secretsAck) {
+  // Only the answer's own credentials block the save: otherwise no answer could
+  // be created while Default holds one. Arming and serving still need the ack.
+  if (docHasSecrets(normalised) && !secretsAck) {
     throw new ValidationError(
       `This answer contains credentials (${secretKeysIn(normalised).join(", ")}). ` +
         "Hosting them means anything that can reach the answer endpoint can read them. " +
@@ -405,6 +409,27 @@ export async function saveAnswer(
 
   const saved = await getAnswer(env, name);
   return saved!;
+}
+
+/**
+ * Bring stored rows in line with the current secret classifier: encrypt values
+ * that became secret-classified after they were saved, and recompute the cached
+ * has_secrets (credentials inherited from Default included). Returns the names
+ * of the rows it changed.
+ */
+export async function refreshSecrets(env: Env): Promise<string[]> {
+  const all = await listAnswers(env);
+  const def = all.find((a) => a.name === DEFAULT_NAME);
+  const changed: string[] = [];
+  for (const record of all) {
+    const doc = await encryptDoc(record.doc, env);
+    const hasSecrets = docHasSecrets(def && record !== def ? mergeDocs(def.doc, doc) : doc);
+    const docJson = JSON.stringify(doc);
+    if (docJson === JSON.stringify(record.doc) && hasSecrets === record.has_secrets) continue;
+    await env.DB.prepare("UPDATE answers SET doc = ?, has_secrets = ? WHERE name = ?").bind(docJson, hasSecrets ? 1 : 0, record.name).run();
+    changed.push(record.name);
+  }
+  return changed;
 }
 
 export async function deleteAnswer(env: Env, name: string): Promise<void> {
