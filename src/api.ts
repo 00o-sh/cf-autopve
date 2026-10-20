@@ -9,7 +9,7 @@ import { bool, num } from "./env";
 import { requireIdentity, type Identity } from "./access";
 import { audit, trimHistory, trimSysinfoKeys } from "./db";
 import {
-  decryptDoc, DEFAULT_NAME, deleteAnswer, docHasSecrets, ensureDefaultAnswer, evaluateRules, getAnswer, lintMerged, listAnswers, MASK_MARKER, maskDoc, MATCH_FIELD_SUGGESTIONS, mergeDocs, normaliseDoc, saveAnswer, secretKeysIn, selectAnswer, validateName, ValidationError,
+  decryptDoc, DEFAULT_NAME, deleteAnswer, docHasSecrets, ensureDefaultAnswer, evaluateRules, getAnswer, lintMerged, listAnswers, MASK_MARKER, maskDoc, MATCH_FIELD_SUGGESTIONS, mergeDocs, normaliseDoc, refreshSecrets, saveAnswer, secretKeysIn, selectAnswer, validateName, ValidationError,
   type AnswerRecord, type ServeMode, type MatchRule,
 } from "./answers";
 import { parseAnswerToml } from "./tomlimport";
@@ -34,8 +34,13 @@ function errorResponse(err: unknown): Response {
   return json({ error: message }, status);
 }
 
-/** Answer as the UI sees it: credential values masked, never plaintext. */
-function publicAnswer(record: AnswerRecord) {
+/**
+ * Answer as the UI sees it: credential values masked, never plaintext.
+ * has_secrets and secret_keys describe what would be served, so they include
+ * credentials inherited from Default.
+ */
+function publicAnswer(record: AnswerRecord, def: AnswerRecord | null) {
+  const served = def && record.name !== DEFAULT_NAME ? mergeDocs(def.doc, record.doc) : record.doc;
   return {
     name: record.name,
     doc: maskDoc(record.doc),
@@ -45,8 +50,8 @@ function publicAnswer(record: AnswerRecord) {
     serves_remaining: record.serves_remaining,
     allow_cidrs: record.allow_cidrs,
     secrets_ack: record.secrets_ack,
-    has_secrets: record.has_secrets,
-    secret_keys: secretKeysIn(record.doc),
+    has_secrets: record.has_secrets || docHasSecrets(served),
+    secret_keys: secretKeysIn(served),
     notes: record.notes,
     updated_at: record.updated_at,
     updated_by: record.updated_by,
@@ -102,7 +107,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     const [answers, relays, files] = await Promise.all([listAnswers(env), listRelays(env), listFiles(env)]);
     return json({
       identity: { email: identity.email, dev: identity.dev },
-      answers: answers.map(publicAnswer),
+      answers: answers.map((a) => publicAnswer(a, answers.find((d) => d.name === DEFAULT_NAME) ?? null)),
       relays: relays.map((r) => ({ ...maskRelay(r), has_hmac: !!r.hmac_secret })),
       files,
       schema: { sections: SECTIONS, order: SECTION_ORDER, formats: FORMATS, match_fields: MATCH_FIELD_SUGGESTIONS },
@@ -124,7 +129,11 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     const name = parts[1];
     const action = parts[2];
 
-    if (!name && method === "GET") return json({ answers: (await listAnswers(env)).map(publicAnswer) });
+    if (!name && method === "GET") {
+      const answers = await listAnswers(env);
+      return json({ answers: answers.map((a) => publicAnswer(a, answers.find((d) => d.name === DEFAULT_NAME) ?? null)) });
+    }
+    const def = await getAnswer(env, DEFAULT_NAME);
 
     if (!name && method === "POST") {
       const body = (await request.json()) as { name: string; copy_from?: string };
@@ -139,7 +148,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
       );
       await recordVersion(env, record, identity.email, source ? `copy of ${source.name}` : "created");
       await audit(env, identity.email, source ? "answer.copy" : "answer.create", newName, source ? `from ${source.name}` : "");
-      return json({ answer: publicAnswer(record) }, 201);
+      return json({ answer: publicAnswer(record, def) }, 201);
     }
 
     if (!name) return json({ error: "method not allowed" }, 405);
@@ -148,7 +157,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     if (!action) {
       if (method === "GET") {
         if (!record) return json({ error: "no such answer" }, 404);
-        return json({ answer: publicAnswer(record), preview: await renderToml(env, record, false), problems: await problemsFor(env, record) });
+        return json({ answer: publicAnswer(record, def), preview: await renderToml(env, record, false), problems: await problemsFor(env, record) });
       }
       if (method === "PUT") {
         const body = (await request.json()) as { doc: any; settings?: any };
@@ -166,7 +175,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
         );
         await recordVersion(env, saved, identity.email, "save", record);
         await audit(env, identity.email, "answer.save", name, saved.has_secrets ? `holds ${secretKeysIn(saved.doc).join(", ")}` : "");
-        return json({ answer: publicAnswer(saved), preview: await renderToml(env, saved, false), problems: await problemsFor(env, saved) });
+        return json({ answer: publicAnswer(saved, def), preview: await renderToml(env, saved, false), problems: await problemsFor(env, saved) });
       }
       if (method === "DELETE") {
         await deleteAnswer(env, name);
@@ -188,7 +197,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
         .bind(to, Date.now(), identity.email, name).run();
       await renameVersions(env, name, to).catch((err) => console.error("answer history not renamed:", err));
       await audit(env, identity.email, "answer.rename", name, `to ${to}`);
-      return json({ answer: publicAnswer((await getAnswer(env, to))!) });
+      return json({ answer: publicAnswer((await getAnswer(env, to))!, def) });
     }
 
     if (action === "versions") {
@@ -210,7 +219,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
         );
         await recordVersion(env, saved, identity.email, `restore of #${id}`, record);
         await audit(env, identity.email, "answer.restore", name, `version #${id}`);
-        return json({ answer: publicAnswer(saved), preview: await renderToml(env, saved, false), problems: await problemsFor(env, saved) });
+        return json({ answer: publicAnswer(saved, def), preview: await renderToml(env, saved, false), problems: await problemsFor(env, saved) });
       }
       return json({ error: "method not allowed" }, 405);
     }
@@ -219,18 +228,18 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
       const body = (await request.json().catch(() => ({}))) as { minutes?: number; serves?: number | null };
       const minutes = Math.min(24 * 60, Math.max(1, Number(body.minutes ?? defaultArmMinutes(env))));
       const serves = body.serves === null || body.serves === undefined ? null : Math.max(1, Number(body.serves));
-      if (record.has_secrets && !record.secrets_ack) {
+      if ((record.has_secrets || docHasSecrets(await mergedDocFor(env, record))) && !record.secrets_ack) {
         throw new ValidationError("Acknowledge credential hosting for this answer before arming it.");
       }
       await armAnswer(env, name, minutes, serves);
       await audit(env, identity.email, "answer.arm", name, `${minutes}m, ${serves ?? "unlimited"} serves`);
-      return json({ answer: publicAnswer((await getAnswer(env, name))!) });
+      return json({ answer: publicAnswer((await getAnswer(env, name))!, def) });
     }
 
     if (action === "disarm" && method === "POST") {
       await disarmAnswer(env, name);
       await audit(env, identity.email, "answer.disarm", name);
-      return json({ answer: publicAnswer((await getAnswer(env, name))!) });
+      return json({ answer: publicAnswer((await getAnswer(env, name))!, def) });
     }
 
     if ((action === "preview" || action === "download") && method === "GET") {
@@ -283,7 +292,7 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
     const raw = JSON.stringify(body.system_info ?? {});
     const selection = await selectAnswer(env, raw);
     if (!selection) return json({ matched: null, reason: "no answers are configured" });
-    let decision = canServe(env, selection.record, { request, ip: "203.0.113.1", pathToken: env.SERVE_TOKEN ?? null });
+    let decision = canServe(env, selection.record, { request, ip: "203.0.113.1", pathToken: env.SERVE_TOKEN ?? null }, selection.merged);
     if (decision.allowed && selection.templateProblems.length) decision = { allowed: false, reason: selection.templateProblems.join(" ") };
     let info: unknown = {};
     try { info = JSON.parse(raw); } catch { /* raw came from JSON.stringify */ }
@@ -417,7 +426,9 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
   if (head === "maintenance" && method === "POST") {
     await trimHistory(env);
     await trimSysinfoKeys(env);
-    return json({ ok: true });
+    const refreshed = await refreshSecrets(env);
+    if (refreshed.length) await audit(env, identity.email, "answer.refresh-secrets", refreshed.join(", "));
+    return json({ ok: true, refreshed });
   }
 
   return json({ error: "not found" }, 404);
