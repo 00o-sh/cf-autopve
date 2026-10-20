@@ -182,6 +182,20 @@ BOOT_DNS=""
 
 die() { echo "build-iso: $*" >&2; exit 1; }
 say() { echo "==> $*" >&2; }
+# Read a secret from the terminal into the variable named $1, echoing * per character.
+read_secret() {
+  local c value=""
+  printf "%s" "$2" >/dev/tty
+  while IFS= read -rsn1 c </dev/tty; do
+    case "$c" in
+      "") break ;;
+      $'\x7f'|$'\b') [ -z "$value" ] || { value="${value%?}"; printf '\b \b' >/dev/tty; } ;;
+      *) value+="$c"; printf '*' >/dev/tty ;;
+    esac
+  done
+  printf '\n' >/dev/tty
+  printf -v "$1" "%s" "$value"
+}
 
 usage() {
   cat <<'EOF'
@@ -291,7 +305,7 @@ if [ "$NO_TOKEN" -eq 0 ]; then
   TOKEN="${AUTOPVE_TOKEN:-}"
   # Read from the terminal, not stdin: when piped, stdin is this script.
   if [ -z "$TOKEN" ] && ( : </dev/tty ) 2>/dev/null; then
-    read -rsp "SERVE_TOKEN (leave empty if the deployment has none): " TOKEN </dev/tty; echo >&2
+    read_secret TOKEN "SERVE_TOKEN (leave empty if the deployment has none): "
   fi
   [ -n "$TOKEN" ] || say "no token given; building for a deployment without SERVE_TOKEN"
 fi
