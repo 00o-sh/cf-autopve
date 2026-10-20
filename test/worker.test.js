@@ -211,3 +211,77 @@ test("hosted files need the serve token, and uploads that look like they hold a 
     assert.ok((await leaky.json()).warnings.length > 0, "a credential in a hosted file is called out");
   } finally { await w.close(); }
 });
+
+test("credentials inherited from Default gate the answer that serves them", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", ANSWER_ENC_KEY: ENC_KEY });
+  try {
+    await w.api("/bootstrap");
+    const base = { ...NODE1, global: { ...NODE1.global, "root-password": "VERIFY-dummy-pw" }, must_contain: [] };
+    await w.api("/answers/Default", "PUT", { doc: base, settings: { secrets_ack: true, serve_mode: "off" } });
+    const child = await w.api("/answers/rackv", "PUT", { doc: { global: { fqdn: "rackv.lab.example" }, must_contain: ["RS700"] }, settings: {} });
+    assert.equal(child.answer.has_secrets, true, "the API reports the inherited credential");
+    assert.deepEqual(child.answer.secret_keys, ["global.root-password"]);
+    assert.equal(child.answer.serve_mode, "armed");
+    await assert.rejects(w.api("/answers/rackv", "PUT", { doc: child.answer.doc, settings: { serve_mode: "always" } }), /"always"/);
+
+    // A child saved before Default held the credential: cached flag clear, serving always.
+    await w.db.prepare("UPDATE answers SET serve_mode = 'always', has_secrets = 0 WHERE name = 'rackv'").run();
+    const http = "http://autopve.example.com/answer";
+    for (const url of ["/answer", http]) {
+      const res = await w.installer(SYSINFO, {}, url);
+      assert.equal(res.status, 403, url);
+      assert.match(await res.text(), /not been acknowledged/);
+    }
+    let dry = await w.api("/match", "POST", { system_info: SYSINFO });
+    assert.equal(dry.matched, "rackv");
+    assert.equal(dry.would_serve, false);
+    assert.match(dry.reason, /not been acknowledged/);
+    await assert.rejects(w.api("/answers/rackv/arm", "POST", { minutes: 5, serves: 1 }), /Acknowledge credential hosting/);
+
+    await w.db.prepare("UPDATE answers SET secrets_ack = 1 WHERE name = 'rackv'").run();
+    assert.match(await (await w.installer(SYSINFO)).text(), /"always" mode/);
+    await w.db.prepare("UPDATE answers SET serve_mode = 'armed' WHERE name = 'rackv'").run();
+    assert.match(await (await w.installer(SYSINFO)).text(), /disarmed/);
+    dry = await w.api("/match", "POST", { system_info: SYSINFO });
+    assert.equal(dry.would_serve, false);
+    assert.match(dry.reason, /disarmed/);
+
+    await w.api("/answers/rackv/arm", "POST", { minutes: 5, serves: 1 });
+    assert.match(await (await w.installer(SYSINFO, {}, http)).text(), /plain HTTP/);
+    const served = await w.installer(SYSINFO);
+    assert.equal(served.status, 200);
+    assert.equal(served.headers.get("X-AutoPVE-Answer"), "rackv");
+    const toml = await served.text();
+    assert.match(toml, /root-password = "VERIFY-dummy-pw"/);
+    assert.match(toml, /fqdn = "rackv.lab.example"/);
+  } finally { await w.close(); }
+});
+
+test("a key the current classifier calls a credential is gated even if the cached flag says otherwise", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", ANSWER_ENC_KEY: ENC_KEY });
+  try {
+    await w.api("/bootstrap");
+    // A row saved before global.subscription-key was classified as a credential.
+    const doc = { global: { "subscription-key": "pve2c-VERIFYDUMMY02" }, must_contain: ["RS700"], must_not_contain: [] };
+    await w.db.prepare(
+      `INSERT INTO answers (name, doc, priority, serve_mode, allow_cidrs, secrets_ack, has_secrets, notes, created_at, updated_at, updated_by)
+       VALUES ('legacy', ?, 100, 'always', '[]', 0, 0, '', 0, 0, 'test')`,
+    ).bind(JSON.stringify(doc)).run();
+
+    for (const url of ["/answer", "http://autopve.example.com/answer"]) {
+      const res = await w.installer(SYSINFO, {}, url);
+      assert.equal(res.status, 403, url);
+      assert.ok(!(await res.text()).includes("VERIFYDUMMY"));
+    }
+    const { answers } = await w.api("/bootstrap");
+    assert.equal(answers.find((a) => a.name === "legacy").has_secrets, true);
+
+    // Maintenance encrypts the plaintext value and corrects the cached flag.
+    assert.deepEqual((await w.api("/maintenance", "POST", {})).refreshed, ["legacy"]);
+    const row = await w.db.prepare("SELECT doc, has_secrets FROM answers WHERE name = 'legacy'").first();
+    assert.ok(!row.doc.includes("VERIFYDUMMY"), "no plaintext left in D1");
+    assert.match(row.doc, /enc:v1:/);
+    assert.equal(row.has_secrets, 1);
+    assert.equal((await w.installer(SYSINFO)).status, 403);
+  } finally { await w.close(); }
+});

@@ -119,7 +119,7 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
     return new Response(`refused: ${reason}\n`, { status: 403, headers: TEXT });
   };
 
-  const decision = canServe(env, record, { request, ip, pathToken });
+  const decision = canServe(env, record, { request, ip, pathToken }, selection.merged);
   if (!decision.allowed) return refuse(decision.reason);
   // Never hand out an answer with a placeholder left in it.
   if (selection.templateProblems.length) return refuse(selection.templateProblems.join(" "));

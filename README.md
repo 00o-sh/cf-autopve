@@ -66,11 +66,18 @@ If you do host:
    cannot be saved at all.** The API refuses rather than silently storing plaintext.
 2. **Explicit acknowledgement.** An answer that holds a credential will not save until someone ticks the
    acknowledgement (typing `HOST SECRETS`) on the Serving tab. That flag is per answer and recorded.
+   A credential an answer inherits from `Default` counts too: the answer saves without the
+   acknowledgement, but is not armed or served until it has its own.
 3. **Armed windows.** Credential-bearing answers default to `serve_mode = "armed"`: they are refused
    until you arm them for N minutes and/or N serves. One install, one arm. `"always"` is rejected for
    such answers unless `ALLOW_ALWAYS_SECRETS=true`. The serve count is spent atomically in D1 *before*
    anything is decrypted, so a burst of concurrent fetches against an answer armed for one serve gets
-   exactly one answer; the rest are refused and recorded.
+   exactly one answer; the rest are refused and recorded. Whether an answer holds a credential is
+   decided at serve time from what would be served (`Default` merged with the answer) using the
+   current list of credential keys, so a credential added to `Default` later, or a key that only
+   became a credential in a newer release, is gated as well. Such a value saved in plaintext by an
+   older release is encrypted the next time its answer is saved, or for every answer at once by
+   `POST /api/maintenance`.
 4. **Source restrictions.** Per-answer IP/CIDR allowlist, an optional deployment-wide `SERVE_TOKEN`,
    and a per-IP rate limit. The token can be sent in any of these ways, best first:
    - `Authorization: Bearer <name>:<token>`, which the installer sends when the ISO is built with
