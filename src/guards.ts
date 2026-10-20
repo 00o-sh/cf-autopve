@@ -87,6 +87,13 @@ export function ipMatchesCidr(ip: string, rule: string): boolean {
   return (a & mask) === (b & mask);
 }
 
+/** Rate-limit identity of a client: IPv6 by its /64, since one host usually holds the whole prefix. */
+export function rateLimitSubject(ip: string): string {
+  if (!ip.includes(":")) return ip;
+  const n = ipv6ToBig(ip);
+  return n === null ? ip : `${(n >> 64n).toString(16)}::/64`;
+}
+
 export function ipAllowed(ip: string, cidrs: string[]): boolean {
   if (cidrs.length === 0) return true;
   if (!ip) return false;

@@ -1,5 +1,6 @@
 import type { Env } from "./env";
 import { num } from "./env";
+import { rateLimitSubject } from "./guards";
 
 export async function audit(env: Env, actor: string, action: string, target = "", detail = ""): Promise<void> {
   await env.DB.prepare("INSERT INTO audit (ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)")
@@ -41,6 +42,14 @@ export async function trimHistory(env: Env): Promise<void> {
     .run();
 }
 
+const SYSINFO_KEY_MAX_LENGTH = 256;
+const SYSINFO_KEYS_LIMIT = 2000;
+const TRIM_SYSINFO_KEYS = "DELETE FROM sysinfo_keys WHERE k NOT IN (SELECT k FROM sysinfo_keys ORDER BY last_seen DESC LIMIT ?)";
+
+export async function trimSysinfoKeys(env: Env): Promise<void> {
+  await env.DB.prepare(TRIM_SYSINFO_KEYS).bind(SYSINFO_KEYS_LIMIT).run();
+}
+
 /**
  * Remember the distinct "key":"value" pairs seen in installer payloads so the
  * filter editor can offer them as match candidates (upstream's
@@ -48,19 +57,19 @@ export async function trimHistory(env: Env): Promise<void> {
  */
 export async function recordSysinfoKeys(env: Env, systemInfoRaw: string): Promise<void> {
   const matches = systemInfoRaw.match(/"[^"]+"\s*:\s*("[^"]*"|\d+|true|false)/g) || [];
-  const uniq = [...new Set(matches)].slice(0, 200);
+  const uniq = [...new Set(matches)].filter((k) => k.length <= SYSINFO_KEY_MAX_LENGTH).slice(0, 200);
   if (uniq.length === 0) return;
   const now = Date.now();
   const stmt = env.DB.prepare("INSERT INTO sysinfo_keys (k, last_seen) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET last_seen = excluded.last_seen");
-  await env.DB.batch(uniq.map((k) => stmt.bind(k, now)));
+  await env.DB.batch([...uniq.map((k) => stmt.bind(k, now)), env.DB.prepare(TRIM_SYSINFO_KEYS).bind(SYSINFO_KEYS_LIMIT)]);
 }
 
-/** Fixed-window per-IP rate limit, stored in D1 so it needs no extra binding. */
+/** Fixed-window per-IP (per-/64 for IPv6) rate limit, stored in D1 so it needs no extra binding. */
 export async function rateLimited(env: Env, ip: string, bucketName: string): Promise<boolean> {
   const limit = num(env.RATE_LIMIT_PER_MIN, 30);
   if (limit === 0 || !ip) return false;
   const window = Math.floor(Date.now() / 60000);
-  const key = `rl:${bucketName}:${ip}:${window}`;
+  const key = `rl:${bucketName}:${rateLimitSubject(ip)}:${window}`;
   const res = await env.DB.prepare(
     "INSERT INTO settings (k, v) VALUES (?, '1') ON CONFLICT(k) DO UPDATE SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT) RETURNING v",
   )
