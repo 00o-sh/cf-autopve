@@ -19,7 +19,8 @@
 import type { Env } from "./env";
 import { bool, num } from "./env";
 import { timingSafeEqual } from "./crypto";
-import type { AnswerRecord } from "./answers";
+import { docHasSecrets, type AnswerRecord } from "./answers";
+import type { AnswerDoc } from "./toml";
 
 export interface Decision {
   allowed: boolean;
@@ -129,7 +130,13 @@ export interface ServeContext {
   pathToken: string | null;
 }
 
-export function canServe(env: Env, record: AnswerRecord, ctx: ServeContext): Decision {
+/**
+ * `served` is the document the installer would receive (Default merged with the
+ * answer). Whether it carries credentials is judged from it with the current
+ * classifier: the cached has_secrets column misses credentials inherited from
+ * Default and keys that became secret-classified after the row was saved.
+ */
+export function canServe(env: Env, record: AnswerRecord, ctx: ServeContext, served: AnswerDoc = record.doc): Decision {
   const now = Date.now();
   const url = new URL(ctx.request.url);
   const secure = url.protocol === "https:" || url.hostname === "localhost" || url.hostname === "127.0.0.1";
@@ -138,7 +145,7 @@ export function canServe(env: Env, record: AnswerRecord, ctx: ServeContext): Dec
   if (record.serve_mode === "off") return deny(`answer "${record.name}" is not being served (serve mode: off)`);
   if (!ipAllowed(ctx.ip, record.allow_cidrs)) return deny(`client ${ctx.ip || "(unknown)"} is not in the allowlist for "${record.name}"`);
 
-  if (record.has_secrets) {
+  if (record.has_secrets || docHasSecrets(served)) {
     if (!record.secrets_ack) return deny(`answer "${record.name}" holds credentials that have not been acknowledged for hosting`);
     if (bool(env.REQUIRE_HTTPS, true) && !secure) return deny("refusing to serve credentials over plain HTTP");
     if (record.serve_mode === "always" && !bool(env.ALLOW_ALWAYS_SECRETS)) {
