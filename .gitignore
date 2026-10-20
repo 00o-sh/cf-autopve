@@ -1,6 +1,9 @@
 node_modules/
 .wrangler/
 .dev.vars
+.env*
+*.pem
+*.key
 dist/
 *.log
 .test-build/

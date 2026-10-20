@@ -134,7 +134,9 @@ export async function requireIdentity(request: Request, env: Env): Promise<Ident
   if (!valid) throw new AccessError("Access token signature did not verify", 401);
 
   const now = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp === "number" && payload.exp < now - 30) throw new AccessError("Access token expired", 401);
+  if (typeof payload.exp !== "number") throw new AccessError("Access token has no expiry", 401);
+  if (payload.exp < now - 30) throw new AccessError("Access token expired", 401);
+  if (payload.nbf !== undefined && typeof payload.nbf !== "number") throw new AccessError("Access token has a malformed nbf", 401);
   if (typeof payload.nbf === "number" && payload.nbf > now + 30) throw new AccessError("Access token not yet valid", 401);
   if (payload.iss !== teamDomain(env)) throw new AccessError("Access token issued by a different team", 403);
 

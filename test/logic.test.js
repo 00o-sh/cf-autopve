@@ -37,6 +37,12 @@ test("redaction replaces credentials only", () => {
   assert.match(toml, /fqdn = "pve.example.com"/);
 });
 
+test("control characters are escaped so the string stays valid TOML", () => {
+  const value = "a\u0000b\bc\u001fd\u007fe\tf\ng\"h\\";
+  assert.equal(A.encodeValue(value), '"a\\u0000b\\u0008c\\u001fd\\u007fe\\tf\\ng\\"h\\\\"');
+  assert.equal(A.parseTomlRaw(`k = ${A.encodeValue(value)}`).k, value);
+});
+
 test("values are coerced the way the key catalogue declares", () => {
   assert.deepEqual(A.coerceValue("disk-setup", "disk-list", '["sda", "sdb"]'), ["sda", "sdb"]);
   assert.deepEqual(A.coerceValue("disk-setup", "disk-list", "sda"), ["sda"]);
@@ -998,6 +1004,14 @@ test("relay targets on the LAN are rejected with an explanation", () => {
   assert.throws(() => A.validateRelayUrl("http://localhost:8080/hook"), /Cloudflare Tunnel/);
   assert.throws(() => A.validateRelayUrl("ftp://example.com"), /http or https/);
   assert.equal(A.validateRelayUrl("https://automation.example.com/h"), "https://automation.example.com/h");
+  for (const host of [
+    "localhost.", "foo.localhost", "2130706433", "127.1", "0x7f.0.0.1", "0.1.2.3", "100.64.0.1", "100.127.255.254",
+    "[::]", "[::1]", "[::ffff:127.0.0.1]", "[::ffff:7f00:1]", "[::ffff:10.0.0.1]", "[::ffff:a9fe:a9fe]",
+    "[fd00::1]", "[fc00::1]", "[fe80::1]", "172.31.0.1", "169.254.169.254",
+  ]) assert.throws(() => A.validateRelayUrl(`http://${host}/hook`), /Cloudflare Tunnel/, host);
+  for (const host of ["100.128.0.1", "8.8.8.8", "[2606:4700::1111]", "[::ffff:8.8.8.8]", "[2001:db8::fd00]"]) {
+    assert.doesNotThrow(() => A.validateRelayUrl(`http://${host}/hook`), host);
+  }
 });
 
 test("signatures are stable and token comparison is length-safe", async () => {
@@ -1149,4 +1163,33 @@ test("a failed relay fetch is described by kind, never by the error itself", () 
     const out = A.fetchFailure(e, 5000);
     assert.ok(!/secret|string|foo/.test(out), out);
   }
+});
+
+test("an Access token must carry a numeric exp; nbf is optional but numeric", async () => {
+  const { privateKey, publicKey } = await crypto.subtle.generateKey(
+    { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
+  const jwk = { ...(await crypto.subtle.exportKey("jwk", publicKey)), kid: "k1" };
+  const env = { ACCESS_TEAM_DOMAIN: "jwt-test.cloudflareaccess.com", ACCESS_AUD: "aud1" };
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const sign = async (claims) => {
+    const head = `${b64({ alg: "RS256", kid: "k1" })}.${b64({ iss: "https://jwt-test.cloudflareaccess.com", aud: "aud1", email: "op@example.com", ...claims })}`;
+    const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", privateKey, new TextEncoder().encode(head));
+    return `${head}.${Buffer.from(sig).toString("base64url")}`;
+  };
+  const check = async (claims) => {
+    const req = new Request("https://autopve.example.com/api/bootstrap", { headers: { "Cf-Access-Jwt-Assertion": await sign(claims) } });
+    try { return (await A.requireIdentity(req, env)).email; } catch (err) { return err.message; }
+  };
+  const now = Math.floor(Date.now() / 1000);
+  const real = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ keys: [jwk] }));
+  try {
+    assert.equal(await check({ exp: now + 60 }), "op@example.com");
+    assert.equal(await check({ exp: now + 60, nbf: now - 10 }), "op@example.com");
+    assert.match(await check({}), /no expiry/);
+    assert.match(await check({ exp: String(now + 60) }), /no expiry/);
+    assert.match(await check({ exp: now - 120 }), /expired/);
+    assert.match(await check({ exp: now + 60, nbf: "0" }), /malformed nbf/);
+    assert.match(await check({ exp: now + 60, nbf: now + 120 }), /not yet valid/);
+  } finally { globalThis.fetch = real; }
 });

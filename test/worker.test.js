@@ -24,9 +24,10 @@ function statements(sql) {
 
 /**
  * Start the Worker with `vars`. Returns helpers bound to it; call close() when
- * done. `outbound` collects every request the Worker makes to the internet.
+ * done. `outbound` collects every request the Worker makes to the internet;
+ * `respond` answers them.
  */
-async function start(vars = {}) {
+async function start(vars = {}, respond = () => new Response("ok")) {
   const outbound = [];
   const mf = new Miniflare(convertV4MiniflareOptions({
     modules: true,
@@ -37,7 +38,7 @@ async function start(vars = {}) {
     bindings: { ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com", ACCESS_AUD: "test-aud", ...vars },
     outboundService: async (req) => {
       outbound.push({ url: req.url, method: req.method, headers: Object.fromEntries(req.headers), body: await req.text() });
-      return new Response("ok");
+      return respond(req);
     },
   }));
   let db;
@@ -118,6 +119,17 @@ test("a credential is stored encrypted, served once inside the arm window, and n
     assert.match(row.doc, /enc:v1:/);
     const preview = await w.api("/answers/node1/preview");
     assert.ok(!preview.toml.includes("hunter2") && preview.toml.includes("REDACTED-BY-AUTOPVE"));
+    // Revealing is a POST, so the cross-site write guard applies to it.
+    for (const action of ["preview", "download"]) {
+      await assert.rejects(w.api(`/answers/node1/${action}?reveal=1`), (err) => err.status === 405);
+      const forged = await w.fetch(`/api/answers/node1/${action}?reveal=1`, { method: "POST", headers: { "Content-Type": "application/json", "Sec-Fetch-Site": "cross-site" } });
+      assert.equal(forged.status, 403);
+    }
+    assert.match((await w.api("/answers/node1/preview?reveal=1", "POST", {})).toml, /hunter2-plaintext/);
+    const download = await w.fetch("/api/answers/node1/download?reveal=1", { method: "POST", body: "{}", headers: { "Content-Type": "application/json", Origin: ORIGIN, "Sec-Fetch-Site": "same-origin" } });
+    assert.match(await download.text(), /hunter2-plaintext/);
+    const reveals = await w.db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'answer.reveal'").first();
+    assert.equal(reveals.n, 2, "only the two same-origin POSTs were audited as reveals");
 
     assert.match(await (await w.installer(SYSINFO)).text(), /serve token missing/);
     assert.match(await (await w.installer(SYSINFO, BEARER)).text(), /disarmed/);
@@ -157,13 +169,16 @@ test("JSON for installers that ask for it, TOML otherwise", async () => {
 });
 
 test("each client IP is rate limited", async () => {
-  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", RATE_LIMIT_PER_MIN: "2" });
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", RATE_LIMIT_PER_MIN: "2", SERVE_TOKEN: TOKEN });
   try {
     await w.api("/bootstrap");
     const codes = [];
     for (let i = 0; i < 3; i++) codes.push((await w.installer(SYSINFO)).status);
     assert.deepEqual(codes.slice(2), [429]);
     assert.notEqual((await w.installer(SYSINFO, { "CF-Connecting-IP": "192.0.2.99" })).status, 429, "another client is unaffected");
+    const guesses = [];
+    for (let i = 0; i < 3; i++) guesses.push((await w.fetch("/files/x.sh?t=guess", { headers: { "CF-Connecting-IP": "192.0.2.50" } })).status);
+    assert.deepEqual(guesses, [403, 403, 429], "wrong-token guesses at /files count against the limit");
   } finally { await w.close(); }
 });
 
@@ -191,6 +206,35 @@ test("a webhook is relayed signed, without the serve token, to the configured ta
   } finally { await w.close(); }
 });
 
+test("a relay target's redirect is not followed, so its credentials go nowhere else", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", ANSWER_ENC_KEY: ENC_KEY, SERVE_TOKEN: TOKEN },
+    () => new Response(null, { status: 307, headers: { Location: "https://elsewhere.example.net/steal" } }));
+  try {
+    await w.api("/relays/deploy", "PUT", { url: "https://automation.example.com/hook", headers: { "X-Api-Key": "k-123" }, hmac_secret: "h", retries: 0 });
+    const { result } = await w.api("/relays/deploy/test", "POST", {});
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 307);
+    assert.match(result.error, /redirects are not followed/);
+    assert.deepEqual(w.outbound.map((r) => r.url), ["https://automation.example.com/hook"]);
+  } finally { await w.close(); }
+});
+
+test("changing a relay's URL drops its stored credentials instead of sending them to the new target", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", ANSWER_ENC_KEY: ENC_KEY });
+  try {
+    const { relay } = await w.api("/relays/deploy", "PUT", { url: "https://a.example.com/h", headers: { "X-Api-Key": "k-123" }, hmac_secret: "h" });
+    const masked = { headers: relay.headers, hmac_secret: relay.hmac_secret };
+    // Same URL: masked values keep what is stored.
+    assert.deepEqual(Object.keys((await w.api("/relays/deploy", "PUT", { url: "https://a.example.com/h", ...masked })).relay.headers), ["X-Api-Key"]);
+    await assert.rejects(w.api("/relays/deploy", "PUT", { url: "https://b.example.com/h", ...masked }), /URL changed.*Re-enter/);
+    await assert.rejects(w.api("/relays/deploy", "PUT", { url: "https://b.example.com/h", hmac_secret: masked.hmac_secret }), /URL changed/);
+    // Omitting the headers on a retarget does not carry the stored ones over either.
+    const moved = (await w.api("/relays/deploy", "PUT", { url: "https://b.example.com/h" })).relay;
+    assert.deepEqual(moved.headers, {});
+    assert.equal(moved.hmac_secret, "");
+  } finally { await w.close(); }
+});
+
 test("hosted files need the serve token, and uploads that look like they hold a credential are flagged", async () => {
   const w = await start({ DEV_ALLOW_INSECURE_UI: "true", SERVE_TOKEN: TOKEN });
   try {
@@ -205,6 +249,18 @@ test("hosted files need the serve token, and uploads that look like they hold a 
     const got = await w.fetch(`/files/first-boot.sh?t=${TOKEN}`);
     assert.equal(got.status, 200);
     assert.equal(await got.text(), script);
+    assert.equal(got.headers.get("Content-Security-Policy"), "sandbox; default-src 'none'");
+    assert.equal(got.headers.get("X-Content-Type-Options"), "nosniff");
+    assert.equal(got.headers.get("Content-Disposition"), null, "a script is served inline for the installer");
+    await w.fetch("/api/files/page.html", {
+      method: "POST", body: "<script>fetch('/api/answers')</script>",
+      headers: { "Content-Type": "application/octet-stream", "X-File-Type": "text/html", Origin: ORIGIN, "Sec-Fetch-Site": "same-origin" },
+    });
+    const page = await w.fetch(`/files/page.html?t=${TOKEN}`);
+    assert.equal(page.headers.get("Content-Disposition"), "attachment", "active content is never rendered on this origin");
+    assert.equal(page.headers.get("Content-Security-Policy"), "sandbox; default-src 'none'");
+    assert.equal((await w.fetch(`/files/%E0%A4%A?t=${TOKEN}`)).status, 404, "a malformed escape is not found, not a 500");
+    assert.equal((await w.fetch("/hook/%E0%A4%A", { method: "POST", body: "{}" })).status, 404);
     const leaky = await w.fetch("/api/files/leaky.sh", {
       method: "POST", body: "#!/bin/sh\nexport API_TOKEN=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\n",
       headers: { "Content-Type": "application/octet-stream", Origin: ORIGIN, "Sec-Fetch-Site": "same-origin" },

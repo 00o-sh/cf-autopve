@@ -242,8 +242,10 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
       return json({ answer: publicAnswer((await getAnswer(env, name))!, def) });
     }
 
-    if ((action === "preview" || action === "download") && method === "GET") {
+    if ((action === "preview" || action === "download") && (method === "GET" || method === "POST")) {
       const reveal = url.searchParams.get("reveal") === "1";
+      // A GET is not covered by crossSiteWriteRefusal: another site could trigger it and forge reveal audit rows.
+      if (reveal && method !== "POST") return json({ error: "revealing credentials needs a POST" }, 405);
       if (reveal) {
         if (!env.ANSWER_ENC_KEY && record.has_secrets) throw new ValidationError("ANSWER_ENC_KEY is not configured; credentials cannot be decrypted.");
         await audit(env, identity.email, "answer.reveal", name, `via ${action}`);

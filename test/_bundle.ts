@@ -18,7 +18,7 @@ export { selectAnswer } from "../src/answers";
 export { findMachine, normaliseFleet, checkTemplate, renderTemplate as renderFleet } from "../src/fleet";
 export { publicError, PublicError, INTERNAL_ERROR } from "../src/errors";
 export { trimTrailing } from "../src/env";
-export { AccessError } from "../src/access";
+export { AccessError, requireIdentity } from "../src/access";
 export { ValidationError } from "../src/answers";
 export { FileError } from "../src/files";
 export { fetchFailure } from "../src/relay";
