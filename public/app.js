@@ -968,13 +968,28 @@ function problemCard(problems, saved = true) {
   ]);
 }
 
+/** The download reveals credentials, so it is a POST (see crossSiteWriteRefusal), saved via a blob URL. */
+async function downloadAnswer(name) {
+  const res = await fetch(`/api/answers/${encodeURIComponent(name)}/download?reveal=1`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { msg = (await res.json()).error || msg; } catch { /* not JSON */ }
+    return toast("Could not download: " + msg, "bad");
+  }
+  const href = URL.createObjectURL(await res.blob());
+  el("a", { href, download: `answer-${name.replace(/[^A-Za-z0-9._-]/g, "_")}.toml` }).click();
+  setTimeout(() => URL.revokeObjectURL(href), 1000);
+}
+
 function renderPreview() {
   const a = S.answer;
   const pre = el("pre", { class: "toml", text: "loading…" });
   const issues = el("div");
   const load = async (reveal) => {
     let r;
-    try { r = await api(`/answers/${encodeURIComponent(a.name)}/preview` + (reveal ? "?reveal=1" : "")); }
+    try { r = await api(`/answers/${encodeURIComponent(a.name)}/preview` + (reveal ? "?reveal=1" : ""), reveal ? { method: "POST" } : {}); }
     catch (err) { pre.textContent = "Could not load the preview: " + err.message; return; }
     pre.textContent = r.toml;
     issues.innerHTML = "";
@@ -990,7 +1005,7 @@ function renderPreview() {
       el("button", { text: "Refresh", onclick: () => load(false) }),
       a.has_secrets ? el("button", { text: "Reveal credentials", onclick: () => load(true) }) : null,
       el("button", { text: "Copy", onclick: async () => { await navigator.clipboard.writeText(pre.textContent); toast("Copied."); } }),
-      el("a", { class: "btn", href: `/api/answers/${encodeURIComponent(a.name)}/download?reveal=1`, download: "", text: "Download answer.toml" }),
+      el("button", { text: "Download answer.toml", onclick: () => downloadAnswer(a.name) }),
     ]),
     pre,
     el("p", { class: "muted", style: "margin-bottom:0", text: "Downloading includes real credentials so the file works offline. Treat it like a secret; the download is recorded in the audit log." }),

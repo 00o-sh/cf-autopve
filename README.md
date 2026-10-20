@@ -92,7 +92,9 @@ If you do host:
    browser may attach to a request another site triggers. Every write must come from this origin
    (`Sec-Fetch-Site` / `Origin`), and a POST must carry a JSON or octet-stream body, which a plain HTML
    form or a no-CORS fetch cannot send. Scripts using an Access service token are unaffected: they send
-   no fetch metadata and pass on the content type.
+   no fetch metadata and pass on the content type. Revealing credentials counts as a write:
+   `preview?reveal=1` and `download?reveal=1` only answer a POST, so another site cannot trigger a
+   reveal (or forge one in the audit log).
 
 Prefer `root-password-hashed` over `root-password`. It is still offline-crackable, so it is still treated
 as a secret here, but it is not a plaintext password on the wire. The configurator makes one for you:

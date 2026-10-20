@@ -118,6 +118,17 @@ test("a credential is stored encrypted, served once inside the arm window, and n
     assert.match(row.doc, /enc:v1:/);
     const preview = await w.api("/answers/node1/preview");
     assert.ok(!preview.toml.includes("hunter2") && preview.toml.includes("REDACTED-BY-AUTOPVE"));
+    // Revealing is a POST, so the cross-site write guard applies to it.
+    for (const action of ["preview", "download"]) {
+      await assert.rejects(w.api(`/answers/node1/${action}?reveal=1`), (err) => err.status === 405);
+      const forged = await w.fetch(`/api/answers/node1/${action}?reveal=1`, { method: "POST", headers: { "Content-Type": "application/json", "Sec-Fetch-Site": "cross-site" } });
+      assert.equal(forged.status, 403);
+    }
+    assert.match((await w.api("/answers/node1/preview?reveal=1", "POST", {})).toml, /hunter2-plaintext/);
+    const download = await w.fetch("/api/answers/node1/download?reveal=1", { method: "POST", body: "{}", headers: { "Content-Type": "application/json", Origin: ORIGIN, "Sec-Fetch-Site": "same-origin" } });
+    assert.match(await download.text(), /hunter2-plaintext/);
+    const reveals = await w.db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'answer.reveal'").first();
+    assert.equal(reveals.n, 2, "only the two same-origin POSTs were audited as reveals");
 
     assert.match(await (await w.installer(SYSINFO)).text(), /serve token missing/);
     assert.match(await (await w.installer(SYSINFO, BEARER)).text(), /disarmed/);
