@@ -108,6 +108,10 @@ export async function deleteFile(env: Env, name: string): Promise<void> {
   await env.DB.prepare("DELETE FROM files WHERE name = ?").bind(name).run();
 }
 
+const ACTIVE_TYPES = [
+  "text/html", "image/svg+xml", "application/xhtml+xml", "text/xml", "application/xml", "application/javascript", "text/javascript",
+];
+
 export async function serveFile(env: Env, name: string): Promise<Response> {
   if (!FILE_NAME_RE.test(name)) return new Response("not found\n", { status: 404 });
   const row = await env.DB
@@ -115,11 +119,16 @@ export async function serveFile(env: Env, name: string): Promise<Response> {
     .bind(name)
     .first<{ name: string; size: number; content_type: string; sha256: string; storage: string; blob: ArrayBuffer | number[] | null }>();
   if (!row) return new Response("not found\n", { status: 404 });
+  const contentType = row.content_type || "application/octet-stream";
+  // Files share the configurator's origin: a hosted page or script must never run there.
+  const active = ACTIVE_TYPES.includes(contentType.split(";")[0].trim().toLowerCase());
   const headers = {
-    "Content-Type": row.content_type || "application/octet-stream",
+    "Content-Type": contentType,
     "Content-Length": String(row.size),
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "sandbox; default-src 'none'",
+    ...(active ? { "Content-Disposition": "attachment" } : {}),
     ETag: `"${row.sha256}"`,
   };
   if (row.storage === "r2") {

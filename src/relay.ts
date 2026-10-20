@@ -8,6 +8,8 @@
  */
 
 import type { Env } from "./env";
+import { trimTrailing } from "./env";
+import { PublicError } from "./errors";
 import { decryptString, encryptString, hmacSha256Hex, isEncrypted } from "./crypto";
 
 export interface RelayRecord {
@@ -31,9 +33,7 @@ interface RelayRow {
   created_at: number; updated_at: number; updated_by: string;
 }
 
-export class RelayError extends Error {
-  status = 400;
-}
+export class RelayError extends PublicError {}
 
 function rowToRecord(row: RelayRow): RelayRecord {
   let headers: Record<string, string> = {};
@@ -51,7 +51,31 @@ export async function getRelay(env: Env, name: string): Promise<RelayRecord | nu
   return row ? rowToRecord(row) : null;
 }
 
-const BLOCKED_HOSTS = /^(localhost|.*\.local|.*\.internal|0\.0\.0\.0|127\..*|10\..*|192\.168\..*|169\.254\..*|172\.(1[6-9]|2\d|3[01])\..*|\[?::1\]?)$/i;
+const BLOCKED_HOSTS = /^(localhost|.*\.localhost|.*\.local|.*\.internal|0\.0\.0\.0|127\..*|10\..*|192\.168\..*|169\.254\..*|172\.(1[6-9]|2\d|3[01])\..*|\[?::1\]?)$/i;
+
+function blockedIpv4(a: number, b: number): boolean {
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+}
+
+/**
+ * Loopback, unspecified, private, link-local, CGNAT and ULA addresses. Takes
+ * a WHATWG URL hostname, which is already canonical: every IPv4 spelling
+ * (2130706433, 127.1, 0x7f.1) becomes dotted decimal, and IPv6 is bracketed
+ * lower-case hex with no embedded dotted quad.
+ */
+function blockedIp(hostname: string): boolean {
+  const v4 = hostname.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (v4) return blockedIpv4(Number(v4[1]), Number(v4[2]));
+  if (!hostname.startsWith("[")) return false;
+  const [head, tail] = hostname.slice(1, -1).split("::");
+  const hs = head ? head.split(":") : [];
+  const ts = tail ? tail.split(":") : [];
+  const g = [...hs, ...Array(8 - hs.length - ts.length).fill("0"), ...ts].map((x) => parseInt(x, 16));
+  // ::a.b.c.d (including :: and ::1) and IPv4-mapped ::ffff:a.b.c.d
+  if (g.slice(0, 5).every((x) => x === 0) && (g[5] === 0 || g[5] === 0xffff)) return blockedIpv4(g[6] >> 8, g[6] & 0xff);
+  return (g[0] & 0xfe00) === 0xfc00 || (g[0] & 0xffc0) === 0xfe80;
+}
 
 export function validateRelayUrl(raw: string): string {
   let url: URL;
@@ -61,7 +85,7 @@ export function validateRelayUrl(raw: string): string {
     throw new RelayError("Relay URL must be an absolute http(s) URL.");
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new RelayError("Relay URL must use http or https.");
-  if (BLOCKED_HOSTS.test(url.hostname)) {
+  if (BLOCKED_HOSTS.test(trimTrailing(url.hostname, ".")) || blockedIp(url.hostname)) {
     throw new RelayError(
       `A Worker cannot reach ${url.hostname} — it runs on Cloudflare's edge, not on your LAN. ` +
         "Expose the target publicly or put it behind a Cloudflare Tunnel.",
@@ -102,7 +126,15 @@ export async function saveRelay(env: Env, name: string, input: RelayInput, actor
   const method = (input.method || "POST").toUpperCase();
   if (!["POST", "PUT", "PATCH"].includes(method)) throw new RelayError("Relay method must be POST, PUT or PATCH.");
 
-  const mergedHeaders: Record<string, string> = { ...(existing?.headers ?? {}) };
+  // Stored credentials were entered for the old target; never carry them to a new one.
+  const retarget = !!existing && existing.url !== url;
+  if (retarget && (Object.values(input.headers ?? {}).includes(RELAY_MASK) || input.hmac_secret === RELAY_MASK)) {
+    throw new RelayError(
+      "The relay URL changed, so its stored header values and HMAC secret are not kept. " +
+        "Re-enter them (or remove them) and save again.",
+    );
+  }
+  const mergedHeaders: Record<string, string> = { ...(retarget ? {} : existing?.headers ?? {}) };
   for (const [k, v] of Object.entries(input.headers ?? {})) {
     if (v === "") delete mergedHeaders[k];
     else if (v === RELAY_MASK) continue; // unchanged secret header
@@ -238,9 +270,14 @@ export async function deliverOnce(
   const { headers, body } = await buildRequest(env, relay, payload, rawBody);
   let result: DeliveryResult;
   try {
-    const res = await fetch(relay.url, { method: relay.method, headers, body, signal: AbortSignal.timeout(relay.timeout_ms) });
+    // Not following redirects: a followed redirect re-sends the secret headers,
+    // signature and body to wherever the Location points.
+    const res = await fetch(relay.url, { method: relay.method, headers, body, redirect: "manual", signal: AbortSignal.timeout(relay.timeout_ms) });
     const text = (await res.text()).slice(0, 2048);
-    result = { ok: res.ok, status: res.status, error: res.ok ? "" : `HTTP ${res.status}`, response: text, attempts: attempt };
+    const error = res.ok ? ""
+      : res.status >= 300 && res.status < 400 ? `HTTP ${res.status}: redirects are not followed; set the relay URL to the final target`
+      : `HTTP ${res.status}`;
+    result = { ok: res.ok, status: res.status, error, response: text, attempts: attempt };
   } catch (err) {
     console.error(`relay ${relay.name} delivery failed:`, err);
     result = { ok: false, status: null, error: fetchFailure(err, relay.timeout_ms), response: "", attempts: attempt };

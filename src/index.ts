@@ -175,7 +175,12 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
 
 async function handleHook(request: Request, env: Env, ctx: ExecutionContext, path: string): Promise<Response> {
   if (request.method !== "POST") return new Response("POST only\n", { status: 405, headers: { ...TEXT, Allow: "POST" } });
-  const segments = path.slice("/hook".length).split("/").filter(Boolean).map(decodeURIComponent);
+  let segments: string[];
+  try {
+    segments = path.slice("/hook".length).split("/").filter(Boolean).map(decodeURIComponent);
+  } catch {
+    return new Response("not found\n", { status: 404, headers: TEXT });
+  }
   const name = segments[0] ?? "";
   const pathToken = segments[1] ?? null;
   const ip = clientIp(request);
@@ -288,8 +293,14 @@ async function handleFile(request: Request, env: Env, path: string): Promise<Res
   }
   const url = new URL(request.url);
   const queryToken = url.searchParams.get("t");
-  const name = decodeURIComponent(path.slice("/files/".length));
-  if (!tokenOk(env, request, queryToken)) return new Response("refused: serve token missing or incorrect\n", { status: 403, headers: TEXT });
+  // Rate limit first, so wrong-token guesses count against the caller.
   if (await rateLimited(env, clientIp(request), "files")) return new Response("rate limit exceeded\n", { status: 429, headers: TEXT });
+  if (!tokenOk(env, request, queryToken)) return new Response("refused: serve token missing or incorrect\n", { status: 403, headers: TEXT });
+  let name: string;
+  try {
+    name = decodeURIComponent(path.slice("/files/".length));
+  } catch {
+    return new Response("not found\n", { status: 404, headers: TEXT });
+  }
   return serveFile(env, name);
 }

@@ -101,7 +101,9 @@ If you do host:
    browser may attach to a request another site triggers. Every write must come from this origin
    (`Sec-Fetch-Site` / `Origin`), and a POST must carry a JSON or octet-stream body, which a plain HTML
    form or a no-CORS fetch cannot send. Scripts using an Access service token are unaffected: they send
-   no fetch metadata and pass on the content type.
+   no fetch metadata and pass on the content type. Revealing credentials counts as a write:
+   `preview?reveal=1` and `download?reveal=1` only answer a POST, so another site cannot trigger a
+   reveal (or forge one in the audit log).
 
 Prefer `root-password-hashed` over `root-password`. It is still offline-crackable, so it is still treated
 as a secret here, but it is not a plaintext password on the wire. The configurator makes one for you:
@@ -556,8 +558,13 @@ if not hmac.compare_digest(expected, sig.removeprefix("sha256=")) or abs(time.ti
     abort(401)
 ```
 
+Changing a relay's URL drops its stored header values and signing secret: re-enter them for the new
+target, so credentials entered for one receiver are never sent to another.
+
 The target must be reachable from Cloudflare's network; a LAN address is rejected with an explanation.
-Put a Cloudflare Tunnel in front of an internal runner if that is where the work happens.
+Put a Cloudflare Tunnel in front of an internal runner if that is where the work happens. Redirects are
+not followed (they would re-send the headers and signature to wherever `Location` points): a `3xx`
+counts as a failed delivery, so set the relay URL to the final target.
 
 ### Install tracking
 
@@ -601,6 +608,9 @@ url = "https://autopve.example.com/files/first-boot.sh"
 
 Files up to `FILE_MAX_BYTES` (default 1 MB) live in D1; bigger ones need the optional R2 binding in
 `wrangler.toml`. Same exposure rule as answers: whatever is here is readable by whoever can reach the URL.
+Files are served with `Content-Security-Policy: sandbox; default-src 'none'` and `nosniff`, and HTML,
+SVG, XML and JavaScript are sent as `Content-Disposition: attachment`, so nothing hosted here runs on
+the configurator's origin.
 
 ## Configuration reference
 
