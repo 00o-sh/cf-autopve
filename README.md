@@ -384,7 +384,8 @@ One ISO serves every node; rebuild only for a new PVE release or a new token. Wh
 supports `--answer-auth-token` (PVE 9.2+), the script uses it, so the token travels as an
 `Authorization` header and stays out of the URL. With an older assistant, or with `--token-in-url`,
 it goes in the URL path instead. Either way the token ends up inside the ISO, so treat the ISO as a
-secret. The equivalent manual command is:
+secret: the script writes it owner-only (mode 0600). An `http://` URL is refused, because the token
+would then cross the network in cleartext; `--insecure-http` allows it anyway. The equivalent manual command is:
 
 ```bash
 proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http \

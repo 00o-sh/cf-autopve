@@ -162,6 +162,9 @@ EOF
 
 main() {
 
+# The output ISO carries SERVE_TOKEN: everything this script creates is owner-only from the start.
+umask 077
+
 ISO_MIRROR="https://enterprise.proxmox.com/iso"
 URL="${AUTOPVE_URL:-}"
 VERSION=""
@@ -171,6 +174,7 @@ RUNNER="auto"
 FIRST_BOOT=""
 NO_TOKEN=0
 TOKEN_IN_URL=0
+INSECURE_HTTP=0
 SAFE_COPY=auto
 BOOT_RANGE=""
 BOOT_GW=""
@@ -191,6 +195,7 @@ Usage: build-iso.sh [options]
   --no-token         the deployment has no SERVE_TOKEN
   --token-in-url     put the token in the answer URL even if the assistant can send it as an
                      Authorization header (the default when it supports --answer-auth-token)
+  --insecure-http    allow an http:// --url; the serve token then crosses the network in cleartext
   --bootstrap-range START-END/PREFIX
                      for networks without DHCP: if DHCP gets no answer, the installer takes a
                      free address from this range (e.g. 10.0.0.240-10.0.0.249/24) to fetch its
@@ -218,6 +223,7 @@ while [ $# -gt 0 ]; do
     --first-boot) FIRST_BOOT="${2:?}"; shift 2 ;;
     --no-token) NO_TOKEN=1; shift ;;
     --token-in-url) TOKEN_IN_URL=1; shift ;;
+    --insecure-http) INSECURE_HTTP=1; shift ;;
     --bootstrap-range) BOOT_RANGE="${2:?}"; shift 2 ;;
     --bootstrap-gateway) BOOT_GW="${2:?}"; shift 2 ;;
     --bootstrap-dns) BOOT_DNS="${2:?}"; shift 2 ;;
@@ -272,7 +278,13 @@ export AUTOPVE_HOOK_TEXT
 
 # Accept https://host, https://host/ or https://host/answer.
 URL="${URL%/}"; URL="${URL%/answer}"
-case "$URL" in https://*) ;; http://*) say "warning: plain http; the Worker refuses credentials over http" ;; *) die "--url must start with https://" ;; esac
+case "$URL" in
+  https://*) ;;
+  http://*)
+    [ "$INSECURE_HTTP" -eq 1 ] || die "--url is plain http, which sends the serve token in cleartext; use https:// (or pass --insecure-http)"
+    say "warning: plain http; the serve token is sent in cleartext (the Worker still refuses to serve answers holding credentials)" ;;
+  *) die "--url must start with https://" ;;
+esac
 
 TOKEN=""
 if [ "$NO_TOKEN" -eq 0 ]; then
@@ -326,6 +338,8 @@ else
     if grep -q "  $NAME\$" "$SUMS"; then
       say "verifying checksum"
       (cd "$(dirname "$ISO")" && grep "  $NAME\$" "$SUMS" | sha256sum -c -) >&2 || die "checksum mismatch for $NAME"
+    else
+      say "WARNING: $NAME is not listed in $ISO_MIRROR/SHA256SUMS; checksum NOT verified"
     fi
   else
     say "warning: $NAME is not an official file name; skipping checksum"
@@ -470,8 +484,10 @@ case "$RUNNER" in
       MOUNTS+=(-v "$(cd "$(dirname "$FIRST_BOOT")" && pwd)/$(basename "$FIRST_BOOT"):/first-boot:ro")
       FB_ARGS=(--on-first-boot /first-boot)
     fi
+    HOST_UID="$(id -u)" HOST_GID="$(id -g)"
+    export HOST_UID HOST_GID
     # shellcheck disable=SC2016  # expands inside the container, not here
-    "$RUNNER" run --rm -e AUTOPVE_ANSWER_URL -e AUTOPVE_BASE_ANSWER_URL -e AUTOPVE_AUTH_TOKEN -e PICK_FETCH -e AUTOPVE_SAFE_COPY \
+    "$RUNNER" run --rm -e HOST_UID -e HOST_GID -e AUTOPVE_ANSWER_URL -e AUTOPVE_BASE_ANSWER_URL -e AUTOPVE_AUTH_TOKEN -e PICK_FETCH -e AUTOPVE_SAFE_COPY \
       -e INJECT_BOOTSTRAP -e AUTOPVE_BOOTSTRAP_CONF -e AUTOPVE_HOOK_TEXT "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq >/dev/null
@@ -481,18 +497,24 @@ case "$RUNNER" in
         > /etc/apt/sources.list.d/pve.list
       apt-get update -qq >/dev/null
       apt-get install -y -qq --no-install-recommends proxmox-auto-install-assistant >/dev/null
+      # Not at the very top: apt reads the keyring as _apt, so it must stay world-readable.
+      umask 077
+      tmp=$(mktemp -d); trap "rm -rf \"\$tmp\"" EXIT
       src="$0" out="$3"; shift 3
       wrap=()
       [ "$AUTOPVE_SAFE_COPY" != 1 ] || wrap=(strace -f -qq -o /dev/null -e trace=copy_file_range,sendfile \
         -e inject=copy_file_range:error=ENOSYS -e inject=sendfile:error=ENOSYS)
       eval "$PICK_FETCH"
       ${wrap[@]+"${wrap[@]}"} proxmox-auto-install-assistant prepare-iso "/src/$src" --fetch-from http \
-        "${FETCH_ARGS[@]}" --output "/out/$out" --tmp /out "$@" \
+        "${FETCH_ARGS[@]}" --output "/out/$out" --tmp "$tmp" "$@" \
         2>&1 | { grep -v --line-buffered arch_set_scno || true; }
       if [ -n "$AUTOPVE_BOOTSTRAP_CONF" ]; then
         eval "$INJECT_BOOTSTRAP"
         inject_bootstrap "/out/$out"
       fi
+      # Rootful: hand the ISO to the invoking user. Rootless maps that user to
+      # root here (/out then shows as not owned by HOST_UID), so it is theirs already.
+      [ "$(stat -c %u /out)" != "$HOST_UID" ] || chown "$HOST_UID:$HOST_GID" "/out/$out"
     ' "$NAME" "$KEY_URL" "$SUITE" "$(basename "$OUTPUT")" ${FB_ARGS[@]+"${FB_ARGS[@]}"}
     ;;
   *) die "unknown runner: $RUNNER" ;;
