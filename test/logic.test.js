@@ -483,7 +483,7 @@ test("through the Worker: /answer marks a machine served, POST /hook marks it in
 
   assert.equal((await post("/hook", HOOK_INFO)).status, 403, "/hook needs the token too");
   const hook = await post("/hook", { ...HOOK_INFO, token: "s3cr3t" });
-  assert.equal(hook.status, 202);
+  assert.equal(hook.status, 200);
   await Promise.all(pending.splice(0));
   const [row] = await A.listInstalls(env);
   assert.equal(row.status, "installed");

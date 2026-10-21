@@ -191,7 +191,7 @@ test("a webhook is relayed signed, without the serve token, to the configured ta
     assert.equal(w.outbound.length, 0);
 
     const res = await w.fetch("/hook/deploy", { method: "POST", body: JSON.stringify(payload), headers: { "Content-Type": "application/json" } });
-    assert.equal(res.status, 202);
+    assert.equal(res.status, 200);
     for (let i = 0; i < 50 && w.outbound.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
     assert.equal(w.outbound.length, 1);
     const [sent] = w.outbound;

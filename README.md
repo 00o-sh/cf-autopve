@@ -546,7 +546,7 @@ unless you give a template (below).
 **Retries.** How retries run depends on whether a Queue is bound:
 
 - **With `RELAY_QUEUE` (recommended).** `/hook` puts the delivery on a Cloudflare Queue before it
-  replies `202`, so an accepted payload survives even if the target is down for minutes. Each attempt
+  replies `200`, so an accepted payload survives even if the target is down for minutes. Each attempt
   runs in its own invocation. A failure backs off 10 s, 20 s, 40 s and so on (up to 5 minutes) until
   the relay's retry count is used up. History shows `queued`, then `retrying` (with the next delay),
   then `relayed` or `error`. The relay is looked up again on each attempt, so disabling or fixing it
