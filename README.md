@@ -450,6 +450,25 @@ before doing anything:
 The prompt is a speed bump, not a security control: by the time it shows, the code that prints it is
 already running. Reviewing the file is the control.
 
+#### Network boot (iPXE)
+
+`scripts/build-pxe.sh` turns an ISO from `build-iso.sh` into three iPXE files: `linux26`,
+`initrd-pxe.img` and `boot.ipxe`. The Proxmox ISO is not built for network boot, so it uses the usual
+workaround: the whole ISO is appended to the initrd as `/proxmox.iso`, where the installer finds it
+when there is no CD. The kernel options come from the ISO's "(Automated)" boot entry, so the machine
+starts the automated install just as it would from the ISO. `--upload` copies the files to S3 or R2
+with the aws CLI:
+
+```bash
+scripts/build-pxe.sh --iso iso/proxmox-ve_9.2-1-autopve.iso --base-url https://assets.example.com/pxe \
+  --upload s3://assets/pxe --r2-account <account id> --profile r2
+```
+
+Then boot the machine into iPXE (your DHCP server's boot file, or a netboot.xyz USB stick) and run
+`chain https://assets.example.com/pxe/boot.ipxe`. Turn Secure Boot off: iPXE is not signed. The
+initrd is the size of the ISO and loads into RAM, and it carries the serve token like the ISO does,
+so give answers that hold credentials an IP allowlist.
+
 ### Networks without DHCP
 
 The installer has to be online before it can fetch an answer. In HTTP mode it
@@ -669,6 +688,7 @@ src/
   files.ts     D1/R2 file hosting + credential scanning
   db.ts        history, audit, rate limiting, sysinfo key learning
   installs.ts  install tracking per machine (Installs dashboard)
+scripts/       build-iso.sh (installer ISO) and build-pxe.sh (iPXE files from that ISO)
 public/        the configurator (no build step, no external assets, strict CSP)
 migrations/    D1 schema
 test/          logic.test.js (functions) and worker.test.js (the bundled Worker in workerd, real D1)
