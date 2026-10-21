@@ -121,7 +121,7 @@ const DISK_FILTERS: Record<string, KeyDef> = {
   "filter.DEVNAME": { description: "Match disks by device node, e.g. /dev/nvme*. Globs * ? [abc] [!a] are allowed. Cannot be combined with disk-list." },
   "filter.ID_SERIAL": { description: "Match disks by full serial, e.g. KIOXIA_KCMYXVUG1T60*. Globs allowed. Cannot be combined with disk-list." },
   "filter.ID_SERIAL_SHORT": { description: "Match disks by short serial number. Globs allowed. Cannot be combined with disk-list." },
-  "filter.ID_MODEL": { description: "Match disks by model, e.g. Samsung SSD 870*. Globs allowed. Cannot be combined with disk-list." },
+  "filter.ID_MODEL": { description: "Match disks by model, e.g. Samsung_SSD_870* (udev replaces spaces with underscores). Globs allowed. Cannot be combined with disk-list." },
   "filter.ID_WWN": { description: "Match disks by World Wide Name, e.g. eui.0100*. Globs allowed. Cannot be combined with disk-list." },
 };
 
