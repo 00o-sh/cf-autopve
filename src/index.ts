@@ -222,7 +222,7 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
       await track();
       if (id % 25 === 0) await trimHistory(env);
     })());
-    return new Response("accepted\n", { status: 202, headers: TEXT });
+    return new Response("accepted\n", { status: 200, headers: TEXT });
   }
 
   const relay = await getRelay(env, name);
@@ -242,7 +242,7 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
   })());
 
   if (queueable) {
-    // Enqueued before the 202, so an accepted payload survives this invocation.
+    // Enqueued before the reply, so an accepted payload survives this invocation.
     await env.RELAY_QUEUE!.send(job);
   } else {
     ctx.waitUntil(
@@ -261,7 +261,9 @@ async function handleHook(request: Request, env: Env, ctx: ExecutionContext, pat
   }
 
   // The installer only needs to know we took the payload; delivery is async.
-  return new Response("accepted\n", { status: 202, headers: TEXT });
+  // 200, not 202: proxmox-post-hook treats anything but 200/201 as a failed
+  // hook and stops at a shell instead of rebooting.
+  return new Response("accepted\n", { status: 200, headers: TEXT });
 }
 
 /** The body as text, cut at `maxBytes` without buffering the rest of it. */
