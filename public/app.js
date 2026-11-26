@@ -1354,19 +1354,23 @@ function renderProfile() {
   };
   const notes = el("textarea", { value: p.notes || "", placeholder: "Which site or rack this is for, who to ask about the addresses, …" });
   notes.addEventListener("input", () => { p.notes = notes.value; });
-  const stale = el("p", { class: "banner warn", hidden: true, text: "Unsaved changes: save to update the command." });
-  const cmd = el("div", { class: "url", text: p.command });
+  const stale = el("p", { class: "banner warn", hidden: true, text: "Unsaved changes: save to update the commands." });
+  const copyBox = (label, text, help) => [
+    el("h3", { text: label, style: "font-size:13px;margin-top:10px" }),
+    el("p", { class: "muted", text: help }),
+    el("div", { class: "url", text }),
+    el("div", { class: "rowbtns" }, [el("button", { text: "Copy", onclick: async () => { await navigator.clipboard.writeText(text); toast("Copied."); } })]),
+  ];
 
   body.append(
     el("div", { class: "card" }, [
       el("h3", { text: "Build command" }),
-      el("p", { class: "muted", text: "Run this on a Linux machine with docker or podman (or Debian with proxmox-auto-install-assistant and xorriso). " +
-        "It downloads build-iso.sh from this Worker, then the Proxmox ISO, verifies its checksum, and writes the autopve ISO under ./iso. " +
+      el("p", { class: "muted", text: "It downloads build-iso.sh from this Worker, then the Proxmox ISO, verifies its checksum, and writes the autopve ISO to ./iso in the folder you run it from. " +
         "It asks for the SERVE_TOKEN on the terminal: the token is never part of the command." }),
-      cmd, stale,
-      el("div", { class: "rowbtns" }, [
-        el("button", { text: "Copy", onclick: async () => { await navigator.clipboard.writeText(p.command); toast("Copied."); } }),
-      ]),
+      stale,
+      ...copyBox("Linux", p.command, "Needs docker or podman (or Debian with proxmox-auto-install-assistant and xorriso)."),
+      ...copyBox("Windows (PowerShell)", p.command_powershell, "Runs the same script in WSL. cd to the folder the ISO should go in first. " +
+        "The WSL distro needs docker (Docker Desktop with WSL integration on) or podman."),
     ]),
     el("div", { class: "card" }, [
       el("h3", { text: "Proxmox release" }),

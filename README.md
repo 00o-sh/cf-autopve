@@ -420,6 +420,16 @@ curl -fsSLo build-iso.sh https://autopve.example.com/build-iso.sh && bash build-
   --bootstrap-range 192.168.100.240-192.168.100.249/24 --bootstrap-gateway 192.168.100.2 --bootstrap-dns 192.168.100.118
 ```
 
+On Windows, the profile also shows a PowerShell form that runs the same command in WSL:
+
+```powershell
+cd C:\iso   # the ISO is written to .\iso here
+wsl -e bash -c "curl -fsSLo build-iso.sh https://autopve.example.com/build-iso.sh && bash build-iso.sh --url https://autopve.example.com ..."
+```
+
+The WSL distro needs docker (Docker Desktop with WSL integration on) or podman, like any other build
+machine. The script already turns on safe copy under WSL.
+
 - **Script source:** the Worker serves `/build-iso.sh` itself. It is the `scripts/build-iso.sh` this
   deployment was built from, so the script always matches the Worker. The route is public: the
   jumpbox has no Access session, and the file holds no secrets.
