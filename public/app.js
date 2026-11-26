@@ -1342,6 +1342,9 @@ async function openProfile(name) {
   showPane("profile-pane");
 }
 
+/** PowerShell: copy the roots Windows trusts into WSL, for networks that inspect HTTPS. */
+const WSL_CERT_SYNC = "# Copy every root certificate Windows trusts into the default WSL distro, so curl in WSL\n# (and the build container) trusts an HTTPS-inspecting antivirus or firewall too. Safe to re-run.\n$dir = Join-Path $env:TEMP 'autopve-winroots'\nRemove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue\nNew-Item -ItemType Directory -Force $dir | Out-Null\nGet-ChildItem Cert:\\LocalMachine\\Root, Cert:\\CurrentUser\\Root |\n  Where-Object { $_.NotAfter -gt (Get-Date) } |\n  Sort-Object Thumbprint -Unique |\n  ForEach-Object {\n    $b64 = [Convert]::ToBase64String($_.RawData, 'InsertLineBreaks').Replace(\"`r\", '')\n    [IO.File]::WriteAllText(\"$dir\\$($_.Thumbprint).crt\", \"-----BEGIN CERTIFICATE-----`n$b64`n-----END CERTIFICATE-----`n\")\n  }\n\"Exported $((Get-ChildItem $dir).Count) Windows roots\"\n$wdir = wsl wslpath -a \"$dir\"\nwsl -u root -e bash -c \"rm -rf /usr/local/share/ca-certificates/windows && mkdir -p /usr/local/share/ca-certificates/windows && cp '$wdir'/*.crt /usr/local/share/ca-certificates/windows/ && update-ca-certificates\"\n";
+
 function renderProfile() {
   const p = S.profile;
   $("#profile-title").textContent = p.name;
@@ -1366,11 +1369,17 @@ function renderProfile() {
     el("div", { class: "card" }, [
       el("h3", { text: "Build command" }),
       el("p", { class: "muted", text: "It downloads build-iso.sh from this Worker, then the Proxmox ISO, verifies its checksum, and writes the autopve ISO to ./iso in the folder you run it from. " +
-        "It asks for the SERVE_TOKEN on the terminal: the token is never part of the command." }),
+        "It asks for the SERVE_TOKEN on the terminal: the token is never part of the command. " +
+        "/build-iso.sh must be on your Access Bypass app next to answer, hook and files; otherwise curl saves the Access sign-in page and bash fails with a syntax error near '<'." }),
       stale,
       ...copyBox("Linux", p.command, "Needs docker or podman (or Debian with proxmox-auto-install-assistant and xorriso)."),
       ...copyBox("Windows (PowerShell)", p.command_powershell, "Runs the same script in WSL. cd to the folder the ISO should go in first. " +
         "The WSL distro needs docker (Docker Desktop with WSL integration on) or podman."),
+      el("p", { class: "muted", text: "curl fails with \"unable to get local issuer certificate\"? An antivirus or firewall is inspecting HTTPS with a root " +
+        "that Windows trusts but WSL does not. This copies every root Windows trusts into WSL (run it once, and again if that root changes):" }),
+      el("div", { class: "rowbtns" }, [el("button", { text: "Copy certificate sync script", onclick: async () => {
+        await navigator.clipboard.writeText(WSL_CERT_SYNC); toast("Copied. Paste it into PowerShell.");
+      } })]),
     ]),
     el("div", { class: "card" }, [
       el("h3", { text: "Proxmox release" }),
