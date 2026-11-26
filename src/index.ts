@@ -17,7 +17,7 @@ import { publicError } from "./errors";
 import { AccessError, requireIdentity } from "./access";
 import { handleApi } from "./api";
 import { addHistory, rateLimited, recordSysinfoKeys, trimHistory } from "./db";
-import { decryptDoc, docHasSecrets, lintMerged, selectAnswer, systemName } from "./answers";
+import { decryptDoc, docHasSecrets, fillHookToken, lintMerged, selectAnswer, systemName } from "./answers";
 import { bodyTokenOk, canServe, claimServe, hookAllowed, tokenOk } from "./guards";
 import { serveFile } from "./files";
 import { MAX_QUEUED_JOB_BYTES, deliver, getRelay, handleRelayBatch, type RelayJob } from "./relay";
@@ -154,7 +154,8 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
   }
 
   const problems = lintMerged(selection.merged);
-  const plain = await decryptDoc(selection.merged, env);
+  const hookToken = fillHookToken(await decryptDoc(selection.merged, env), env.SERVE_TOKEN, new URL(request.url).origin, systemInfo);
+  const plain = hookToken.doc;
   const asJson = (env.ANSWER_FORMAT ?? "auto").toLowerCase() !== "toml" && prefersJson(request.headers.get("Accept"));
   const body = asJson ? JSON.stringify(emitJson(plain)) : emitToml(plain);
   const redacted = emitToml(selection.merged, { redact: true, redactionText: "REDACTED-BY-AUTOPVE" });
@@ -168,6 +169,7 @@ async function handleAnswer(request: Request, env: Env, ctx: ExecutionContext, p
           selection.machine ? `machine table row ${selection.machine.row} (${selection.machine.key})` : "",
           docHasSecrets(selection.merged) ? "served with credentials" : "",
           asJson ? "as JSON" : "",
+          hookToken.filled ? "webhook auth-token filled in" : "",
           problems.length ? `installer will likely reject it: ${problems.join(" ")}` : "",
         ].filter(Boolean).join("; "),
         response: redacted, system_info: systemInfoRaw,
