@@ -555,15 +555,19 @@ so without a token anyone who guessed a relay name could trigger it with a paylo
 signed with your HMAC secret. While no token is configured, every `/hook` call is refused with
 `403 relays are disabled until a SERVE_TOKEN is configured`.
 
-Create a relay, then set it in the answer's **Post Install** section. Set `auth-token` to the
-`SERVE_TOKEN` (PVE 9.2+). The installer sends it as a top-level `token` field in the JSON body, so it
-stays out of the URL:
+Create a relay, then set it as the `url` in the answer's **Post Install** section:
 
 ```toml
 [post-installation-webhook]
 url = "https://autopve.example.com/hook/deploy"
-auth-token = "<SERVE_TOKEN>"
 ```
+
+You don't need to set `auth-token`. When the url is this Worker's `/hook` and `auth-token` is
+empty, the Worker fills in the `SERVE_TOKEN` as it serves the answer. The installer then sends it as a
+top-level `token` field in the JSON body, so it stays out of the URL. This applies only to installers
+that report PVE 9.2 or newer in their system information (`iso.release`): older installers reject
+`auth-token` as an unknown field. The installer had to present the same token to fetch the answer, so
+this reveals nothing new. History keeps the redacted answer and notes "webhook auth-token filled in".
 
 The Worker removes that `token` field before relaying the payload, so your automation never sees the
 serve token. A different `auth-token` value is taken to be the receiver's own and is passed through,
@@ -638,10 +642,10 @@ records the result:
 ```toml
 [post-installation-webhook]
 url = "https://autopve.example.com/hook"
-auth-token = "<SERVE_TOKEN>"
 ```
 
-A relay URL (`/hook/<name>`) records it too, before relaying. Both need the `SERVE_TOKEN`.
+A relay URL (`/hook/<name>`) records it too, before relaying. Both need the `SERVE_TOKEN`, which the
+Worker fills in as `auth-token` for PVE 9.2+ installers (see [Post-installation webhook relay](#post-installation-webhook-relay)).
 
 Machines are identified by DMI system UUID, then serial, then lowest MAC, skipping firmware filler
 like `To Be Filled By O.E.M.` or all-zero UUIDs, so the answer request and the webhook land on the same

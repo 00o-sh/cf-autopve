@@ -221,7 +221,7 @@ const POST_INSTALL: Record<string, KeyDef> = {
   "cert-fingerprint": { description: "Optional. SHA256 certificate fingerprint if certificate pinning should be used.", format: "fingerprint" },
   "auth-token": {
     description:
-      "Optional (PVE 9.2+). An opaque token the installer adds as a top-level \"token\" field in the webhook's JSON body, so the receiver can authenticate the callback. Treated as a credential.",
+      "Optional (PVE 9.2+). An opaque token the installer adds as a top-level \"token\" field in the webhook's JSON body, so the receiver can authenticate the callback. Treated as a credential. Leave it empty when the url is this Worker's /hook: the Worker fills in its SERVE_TOKEN when it serves the answer to a PVE 9.2+ installer.",
     type: "str",
     secret: true,
   },

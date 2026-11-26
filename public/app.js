@@ -1296,7 +1296,7 @@ function renderRelay() {
     el("div", { class: "card" }, [el("h3", { text: "Body template" }), tmpl]),
     el("div", { class: "card" }, [
       el("h3", { text: "Installer configuration" }),
-      el("p", { class: "muted", text: "Set this as the post-installation-webhook url in your answer, and set its auth-token (PVE 9.2+) to your SERVE_TOKEN. The token then travels in the request body instead of the URL, and it is removed before the payload is relayed. Older installers: append /<SERVE_TOKEN> to the URL instead." }),
+      el("p", { class: "muted", text: "Set this as the post-installation-webhook url in your answer. Leave auth-token empty: the Worker fills in its SERVE_TOKEN when it serves the answer to a PVE 9.2+ installer, so the token travels in the request body instead of the URL, and it is removed before the payload is relayed. Older installers: append /<SERVE_TOKEN> to the URL instead." }),
       el("div", { class: "url", text: `${S.boot.config.origin}/hook/${r.name}` }),
       S.boot.config.serve_token_configured ? "" : el("div", { class: "banner warn", text:
         "No SERVE_TOKEN is set, so this relay will refuse every installer call. Set one: openssl rand -hex 24 | wrangler secret put SERVE_TOKEN" }),
