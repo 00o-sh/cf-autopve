@@ -13,6 +13,7 @@ import {
   type AnswerRecord, type ServeMode, type MatchRule,
 } from "./answers";
 import { parseAnswerToml } from "./tomlimport";
+import { buildCommand, deleteProfile, listProfiles, saveProfile, type IsoProfile } from "./isoprofiles";
 import { armAnswer, canServe, crossSiteWriteRefusal, defaultArmMinutes, disarmAnswer } from "./guards";
 import { deleteFile, listFiles, putFile, FileError, FILE_NAME_RE } from "./files";
 import { RELAY_MASK, RelayError, deleteRelay, deliver, getRelay, listRelays, maskRelay, saveRelay } from "./relay";
@@ -80,6 +81,10 @@ async function renderToml(env: Env, record: AnswerRecord, reveal: boolean): Prom
   return emitToml(doc, { redact: !reveal, redactionText: REDACTION, header });
 }
 
+function withCommand(p: IsoProfile, origin: string) {
+  return { ...p, command: buildCommand(origin, p) };
+}
+
 export async function handleApi(request: Request, env: Env): Promise<Response> {
   let identity: Identity;
   try {
@@ -104,12 +109,13 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
 
   if (head === "bootstrap" && method === "GET") {
     await ensureDefaultAnswer(env);
-    const [answers, relays, files] = await Promise.all([listAnswers(env), listRelays(env), listFiles(env)]);
+    const [answers, relays, files, profiles] = await Promise.all([listAnswers(env), listRelays(env), listFiles(env), listProfiles(env)]);
     return json({
       identity: { email: identity.email, dev: identity.dev },
       answers: answers.map((a) => publicAnswer(a, answers.find((d) => d.name === DEFAULT_NAME) ?? null)),
       relays: relays.map((r) => ({ ...maskRelay(r), has_hmac: !!r.hmac_secret })),
       files,
+      iso_profiles: profiles.map((p) => withCommand(p, url.origin)),
       schema: { sections: SECTIONS, order: SECTION_ORDER, formats: FORMATS, match_fields: MATCH_FIELD_SUGGESTIONS },
       config: {
         encryption_configured: !!env.ANSWER_ENC_KEY,
@@ -388,6 +394,24 @@ async function route(request: Request, env: Env, identity: Identity): Promise<Re
       const result = await deliver(env, relay, payload, JSON.stringify(payload), null);
       await audit(env, identity.email, "relay.test", name, `status ${result.status ?? result.error}`);
       return json({ result });
+    }
+    return json({ error: "method not allowed" }, 405);
+  }
+
+  if (head === "iso-profiles") {
+    const name = parts[1];
+    if (!name && method === "GET") return json({ iso_profiles: (await listProfiles(env)).map((p) => withCommand(p, url.origin)) });
+    if (!name) return json({ error: "method not allowed" }, 405);
+    if (method === "PUT") {
+      const body = (await request.json()) as Partial<IsoProfile>;
+      const profile = await saveProfile(env, validateName(name), body, identity.email);
+      await audit(env, identity.email, "iso-profile.save", profile.name, profile.boot_range || "dhcp");
+      return json({ iso_profile: withCommand(profile, url.origin) });
+    }
+    if (method === "DELETE") {
+      await deleteProfile(env, name);
+      await audit(env, identity.email, "iso-profile.delete", name);
+      return json({ ok: true });
     }
     return json({ error: "method not allowed" }, 405);
   }

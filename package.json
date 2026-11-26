@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/logic.test.js test/worker.test.js",
     "db:init:local": "wrangler d1 migrations apply autopve --local",
-    "pretest": "esbuild test/_bundle.ts --bundle --format=esm --platform=neutral --outfile=.test-build/bundle.mjs --log-level=warning && esbuild src/index.ts --bundle --format=esm --platform=neutral --outfile=.test-build/worker.mjs --log-level=warning",
+    "pretest": "esbuild test/_bundle.ts --bundle --format=esm --platform=neutral --loader:.sh=text --outfile=.test-build/bundle.mjs --log-level=warning && esbuild src/index.ts --bundle --format=esm --platform=neutral --loader:.sh=text --outfile=.test-build/worker.mjs --log-level=warning",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {

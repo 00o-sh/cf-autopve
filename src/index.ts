@@ -7,6 +7,7 @@
  *   POST /hook/<name> post-installation webhook -> outbound relay (needs SERVE_TOKEN)
  *   POST /hook        post-installation webhook, install tracking only (needs SERVE_TOKEN)
  *   GET  /files/<n>   first-boot scripts and other hosted files
+ *   GET  /build-iso.sh the ISO build script, for the configurator's one-liner (public, no secrets)
  *   GET  /healthz     liveness
  */
 
@@ -22,6 +23,7 @@ import { serveFile } from "./files";
 import { MAX_QUEUED_JOB_BYTES, deliver, getRelay, handleRelayBatch, type RelayJob } from "./relay";
 import { emitJson, emitToml, prefersJson } from "./toml";
 import { trackAnswer, trackInstalled } from "./installs";
+import BUILD_ISO_SH from "../scripts/build-iso.sh";
 
 const TEXT = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" };
 /** What a refused caller without the serve token leaves in history: enough to see the probe. */
@@ -37,6 +39,7 @@ export default {
       if (path === "/answer" || path.startsWith("/answer/")) return await handleAnswer(request, env, ctx, path);
       if (path === "/hook" || path.startsWith("/hook/")) return await handleHook(request, env, ctx, path);
       if (path.startsWith("/files/")) return await handleFile(request, env, path);
+      if (path === "/build-iso.sh") return buildIsoScript(request);
       if (path === "/api" || path.startsWith("/api/")) return await handleApi(request, env);
       return await handleUi(request, env);
     } catch (err) {
@@ -49,6 +52,20 @@ export default {
     await handleRelayBatch(batch, env);
   },
 };
+
+/**
+ * The jumpbox that builds the ISO has no Access session, so this is public.
+ * It is the same file as scripts/build-iso.sh in the public repository and
+ * holds no secrets; serving it from here keeps it in step with this deployment.
+ */
+function buildIsoScript(request: Request): Response {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("GET only\n", { status: 405, headers: { ...TEXT, Allow: "GET" } });
+  }
+  return new Response(request.method === "HEAD" ? null : BUILD_ISO_SH, {
+    headers: { ...TEXT, "Content-Disposition": 'attachment; filename="build-iso.sh"', "X-Content-Type-Options": "nosniff" },
+  });
+}
 
 async function handleUi(request: Request, env: Env): Promise<Response> {
   try {

@@ -42,6 +42,14 @@
       <ul id="relay-list" class="list"></ul>
     </section>
     <section>
+      <h2>ISO builds</h2>
+      <div class="rowbtns">
+        <button id="profile-add" title="New ISO build" aria-label="New ISO build">+</button>
+        <button id="profile-delete" class="danger" title="Delete selected ISO build">delete</button>
+      </div>
+      <ul id="profile-list" class="list"></ul>
+    </section>
+    <section>
       <h2>Files</h2>
       <div class="rowbtns">
         <button id="file-add" title="Upload a file">upload</button>
@@ -83,6 +91,14 @@
         </div>
       </div>
       <div id="relay-body"></div>
+    </div>
+
+    <div id="profile-pane" class="pane" hidden>
+      <div class="panehead">
+        <h1 id="profile-title"></h1>
+        <div class="panehead-right"><button id="profile-save" class="primary">Save</button></div>
+      </div>
+      <div id="profile-body"></div>
     </div>
 
     <div id="installs-pane" class="pane" hidden>

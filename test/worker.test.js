@@ -235,6 +235,55 @@ test("changing a relay's URL drops its stored credentials instead of sending the
   } finally { await w.close(); }
 });
 
+test("build-iso.sh is served without Access, byte for byte the repository's script", async () => {
+  // No DEV_ALLOW_INSECURE_UI: the jumpbox that runs the one-liner has no Access session.
+  const w = await start({ SERVE_TOKEN: "s3cret-token-value" });
+  try {
+    const res = await w.fetch("/build-iso.sh");
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), readFileSync(new URL("scripts/build-iso.sh", root), "utf8"));
+    assert.equal((await w.fetch("/build-iso.sh", { method: "POST" })).status, 405);
+    assert.equal((await w.fetch("/api/iso-profiles")).status, 401, "profiles stay behind Access");
+  } finally { await w.close(); }
+});
+
+test("ISO build profiles: validated like build-iso.sh, and give a one-liner without the token", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", SERVE_TOKEN: "s3cret-token-value" });
+  try {
+    const yeled = await w.api("/iso-profiles/Yeled", "PUT", {
+      boot_range: "192.168.100.240-192.168.100.249/24", boot_gateway: "192.168.100.2", boot_dns: "192.168.100.118", notes: "rack 2",
+    });
+    assert.equal(yeled.iso_profile.command,
+      "curl -fsSLo build-iso.sh https://localhost/build-iso.sh && bash build-iso.sh --url https://localhost " +
+      "--bootstrap-range 192.168.100.240-192.168.100.249/24 --bootstrap-gateway 192.168.100.2 --bootstrap-dns 192.168.100.118");
+
+    const dhcp = await w.api("/iso-profiles/Lab DHCP", "PUT", { version: "9.2-1" });
+    assert.equal(dhcp.iso_profile.command, "curl -fsSLo build-iso.sh https://localhost/build-iso.sh && bash build-iso.sh --url https://localhost --version 9.2-1");
+
+    for (const [body, re] of [
+      [{ boot_range: "192.168.100.240-192.168.100.249/24" }, /go together/],
+      [{ boot_range: "192.168.100.240/24", boot_gateway: "192.168.100.2" }, /must look like/],
+      [{ boot_range: "192.168.100.249-192.168.100.240/24", boot_gateway: "192.168.100.2" }, /end is before start/],
+      [{ boot_range: "192.168.100.240-192.168.100.249/24", boot_gateway: "10.0.0.1" }, /gateway is not in/],
+      [{ boot_range: "192.168.100.240-192.168.101.9/24", boot_gateway: "192.168.100.2" }, /range end is not in/],
+      [{ boot_range: "192.168.100.240-192.168.100.249/24", boot_gateway: "192.168.100.2", boot_dns: "8.8.8.8,dns.example" }, /not an IPv4/],
+      [{ version: "latest" }, /Version must look like/],
+      [{ version: "9.2-1; rm -rf /" }, /Version must look like/],
+    ]) {
+      await assert.rejects(w.api("/iso-profiles/bad", "PUT", body), (err) => err.status === 400 && re.test(err.message), JSON.stringify(body));
+    }
+
+    const { iso_profiles } = await w.api("/iso-profiles");
+    assert.deepEqual(iso_profiles.map((p) => p.name), ["Lab DHCP", "Yeled"]);
+    assert.ok(!JSON.stringify(iso_profiles).includes("s3cret-token-value"));
+    const boot = await w.api("/bootstrap");
+    assert.equal(boot.iso_profiles.find((p) => p.name === "Yeled").command, yeled.iso_profile.command);
+
+    await w.api("/iso-profiles/Lab DHCP", "DELETE");
+    assert.deepEqual((await w.api("/iso-profiles")).iso_profiles.map((p) => p.name), ["Yeled"]);
+  } finally { await w.close(); }
+});
+
 test("hosted files need the serve token, and uploads that look like they hold a credential are flagged", async () => {
   const w = await start({ DEV_ALLOW_INSECURE_UI: "true", SERVE_TOKEN: TOKEN });
   try {
