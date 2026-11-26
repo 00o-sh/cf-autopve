@@ -257,6 +257,9 @@ test("ISO build profiles: validated like build-iso.sh, and give a one-liner with
       "curl -fsSLo build-iso.sh https://localhost/build-iso.sh && bash build-iso.sh --url https://localhost " +
       "--bootstrap-range 192.168.100.240-192.168.100.249/24 --bootstrap-gateway 192.168.100.2 --bootstrap-dns 192.168.100.118");
 
+    assert.equal(yeled.iso_profile.command_powershell, `wsl -e bash -c "${yeled.iso_profile.command}"`);
+    assert.doesNotMatch(yeled.iso_profile.command, /["$`]/, "nothing PowerShell would expand inside its double quotes");
+
     const dhcp = await w.api("/iso-profiles/Lab DHCP", "PUT", { version: "9.2-1" });
     assert.equal(dhcp.iso_profile.command, "curl -fsSLo build-iso.sh https://localhost/build-iso.sh && bash build-iso.sh --url https://localhost --version 9.2-1");
 
