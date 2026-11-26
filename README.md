@@ -430,6 +430,16 @@ wsl -e bash -c "curl -fsSLo build-iso.sh https://autopve.example.com/build-iso.s
 The WSL distro needs docker (Docker Desktop with WSL integration on) or podman, like any other build
 machine. The script already turns on safe copy under WSL.
 
+If `curl` in WSL fails with `unable to get local issuer certificate`, an antivirus or firewall is
+inspecting HTTPS with a root that Windows trusts but WSL does not. The profile's **Copy certificate sync
+script** button copies a PowerShell script that does three things:
+- exports every valid root from the Windows machine and user Trusted Root stores;
+- installs them in WSL under `/usr/local/share/ca-certificates/windows`;
+- runs `update-ca-certificates`.
+
+The build container then uses the same trust store, because `build-iso.sh` passes the host's CA bundle
+into it. Re-run the script when that root changes.
+
 - **Script source:** the Worker serves `/build-iso.sh` itself. It is the `scripts/build-iso.sh` this
   deployment was built from, so the script always matches the Worker. The route is public: the
   jumpbox has no Access session, and the file holds no secrets.
