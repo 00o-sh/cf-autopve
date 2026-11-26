@@ -13,7 +13,7 @@ import {
   type AnswerRecord, type ServeMode, type MatchRule,
 } from "./answers";
 import { parseAnswerToml } from "./tomlimport";
-import { buildCommand, deleteProfile, listProfiles, saveProfile, type IsoProfile } from "./isoprofiles";
+import { buildCommand, buildCommandPowerShell, deleteProfile, listProfiles, saveProfile, type IsoProfile } from "./isoprofiles";
 import { armAnswer, canServe, crossSiteWriteRefusal, defaultArmMinutes, disarmAnswer } from "./guards";
 import { deleteFile, listFiles, putFile, FileError, FILE_NAME_RE } from "./files";
 import { RELAY_MASK, RelayError, deleteRelay, deliver, getRelay, listRelays, maskRelay, saveRelay } from "./relay";
@@ -82,7 +82,7 @@ async function renderToml(env: Env, record: AnswerRecord, reveal: boolean): Prom
 }
 
 function withCommand(p: IsoProfile, origin: string) {
-  return { ...p, command: buildCommand(origin, p) };
+  return { ...p, command: buildCommand(origin, p), command_powershell: buildCommandPowerShell(origin, p) };
 }
 
 export async function handleApi(request: Request, env: Env): Promise<Response> {

@@ -1193,3 +1193,29 @@ test("an Access token must carry a numeric exp; nbf is optional but numeric", as
     assert.match(await check({ exp: now + 60, nbf: now + 120 }), /not yet valid/);
   } finally { globalThis.fetch = real; }
 });
+
+test("fillHookToken: only this Worker's /hook, only when empty, only PVE 9.2+", () => {
+  const doc = (hook) => ({ global: { keyboard: "de" }, "post-installation-webhook": hook });
+  const iso = { iso: { release: "9.2", isorelease: "1" } };
+  const fill = (d, info = iso, token = "T") => A.fillHookToken(d, token, "https://autopve.example.com", info);
+
+  const out = fill(doc({ url: "https://autopve.example.com/hook/" }));
+  assert.equal(out.filled, true);
+  assert.equal(out.doc["post-installation-webhook"]["auth-token"], "T");
+  assert.equal(fill(doc({ url: "https://autopve.example.com/hook" })).filled, true);
+  assert.equal(fill(doc({ url: "https://autopve.example.com/hook/relay" })).filled, true);
+  assert.equal(fill(doc({ url: "https://autopve.example.com/hook", "auth-token": "theirs" })).filled, false, "an explicit token wins");
+  assert.equal(fill(doc({ url: "https://autopve.example.com/hookx" })).filled, false);
+  assert.equal(fill(doc({ url: "https://autopve.example.com/answer" })).filled, false);
+  assert.equal(fill(doc({ url: "https://evil.example.com/hook" })).filled, false);
+  assert.equal(fill(doc({ url: "not a url" })).filled, false);
+  assert.equal(fill({ global: {} }).filled, false);
+  assert.equal(fill(doc({ url: "https://autopve.example.com/hook" }), iso, "").filled, false, "no SERVE_TOKEN configured");
+  for (const release of ["9.1", "8.4", "garbage", 9.2]) {
+    assert.equal(fill(doc({ url: "https://autopve.example.com/hook" }), { iso: { release } }).filled, false, String(release));
+  }
+  assert.equal(fill(doc({ url: "https://autopve.example.com/hook" }), { iso: { release: "10.0" } }).filled, true);
+  const original = doc({ url: "https://autopve.example.com/hook" });
+  fill(original);
+  assert.equal(original["post-installation-webhook"]["auth-token"], undefined, "the input document is not modified");
+});
