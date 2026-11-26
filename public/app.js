@@ -1369,7 +1369,8 @@ function renderProfile() {
     el("div", { class: "card" }, [
       el("h3", { text: "Build command" }),
       el("p", { class: "muted", text: "It downloads build-iso.sh from this Worker, then the Proxmox ISO, verifies its checksum, and writes the autopve ISO to ./iso in the folder you run it from. " +
-        "It asks for the SERVE_TOKEN on the terminal: the token is never part of the command." }),
+        "It asks for the SERVE_TOKEN on the terminal: the token is never part of the command. " +
+        "/build-iso.sh must be on your Access Bypass app next to answer, hook and files; otherwise curl saves the Access sign-in page and bash fails with a syntax error near '<'." }),
       stale,
       ...copyBox("Linux", p.command, "Needs docker or podman (or Debian with proxmox-auto-install-assistant and xorriso)."),
       ...copyBox("Windows (PowerShell)", p.command_powershell, "Runs the same script in WSL. cd to the folder the ISO should go in first. " +

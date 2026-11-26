@@ -152,14 +152,17 @@ Then put **Cloudflare Access** in front of the configurator:
 1. Zero Trust → Access → Applications → *Add a self-hosted application* for the configurator.
    Domain: your Worker's hostname, **path empty**. Policy: **Allow**, include your email or group
    (add device posture etc. as you like).
-2. Add a **second** self-hosted application for the installer endpoints, with three destinations on the
-   same hostname: paths `answer`, `hook` and `files` (each covers its sub-paths). Policy: **Bypass**,
-   include your lab's public IP range (or Everyone if installs can come from anywhere).
+2. Add a **second** self-hosted application for the installer endpoints, with four destinations on the
+   same hostname: paths `answer`, `hook` and `files` (each covers its sub-paths), and `build-iso.sh`
+   (the ISO build script the configurator's one-liner downloads; it holds no secrets). Policy:
+   **Bypass**, include your lab's public IP range (or Everyone if installs can come from anywhere).
+   Without `build-iso.sh` in it, the one-liner downloads the Access sign-in page and bash fails with
+   ``syntax error near unexpected token `<'``.
 
    The second app is required: Access sits in front of the Worker, so with only the first app the
    installer gets a login page instead of its answer. It has to be a separate app because Access
    policies apply to every path in an app. Access picks the most specific app by path first, so these
-   three paths land on the Bypass app and everything else on the login app. The Worker's own guards
+   paths land on the Bypass app and everything else on the login app. The Worker's own guards
    (arming, allowlists, token, rate limit) still apply behind the bypass.
 3. Copy the **configurator** app's **Application Audience (AUD) tag** into `ACCESS_AUD` and your team
    domain into `ACCESS_TEAM_DOMAIN` in `wrangler.toml`, then redeploy. The installer app's AUD is not
