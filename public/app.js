@@ -23,7 +23,7 @@ const onActivate = (fn) => (e) => {
 };
 
 const S = {
-  boot: null, answers: [], answer: null, relays: [], relay: null, files: [],
+  boot: null, answers: [], answer: null, relays: [], relay: null, files: [], isoProfiles: [], profile: null,
   sysinfoKeys: [], tab: "global", dirty: false, history: [], live: false, timer: null,
 };
 
@@ -94,6 +94,7 @@ async function boot() {
   S.answers = S.boot.answers;
   S.relays = S.boot.relays;
   S.files = S.boot.files;
+  S.isoProfiles = S.boot.iso_profiles || [];
   $("#identity").textContent = S.boot.identity.email + (S.boot.identity.dev ? " (dev mode)" : "");
   renderBanners();
   renderSidebar();
@@ -150,6 +151,15 @@ function renderSidebar() {
     }, [el("span", { text: r.name }), el("span", { class: "dot " + (r.enabled ? "armed" : "off"), role: "img",
       "aria-label": r.enabled ? "enabled" : "disabled", title: r.enabled ? "enabled" : "disabled" })]));
   }
+  const plist = $("#profile-list");
+  plist.innerHTML = "";
+  for (const p of S.isoProfiles) {
+    plist.append(el("li", {
+      class: S.profile && S.profile.name === p.name ? "active" : "",
+      onclick: () => openProfile(p.name), onkeydown: onActivate(() => openProfile(p.name)), tabindex: "0", role: "button",
+      title: p.boot_range ? "no DHCP: bootstrap " + p.boot_range : "DHCP network",
+    }, [el("span", { text: p.name })]));
+  }
   const flist = $("#file-list");
   flist.innerHTML = "";
   for (const f of S.files) {
@@ -170,6 +180,7 @@ async function openAnswer(name) {
   const data = await api("/answers/" + encodeURIComponent(name));
   S.answer = data.answer;
   S.relay = null;
+  S.profile = null;
   S.dirty = false;
   S.tomlDraft = null;
   S.tab = ["history", "preview", "serving", "filters", "versions"].includes(S.tab) ? S.tab : "global";
@@ -841,7 +852,7 @@ function renderServing() {
       ? ". The installer sends the token as an Authorization header (prepare-iso --answer-auth-token, PVE 9.2+); older assistants can put it in the URL instead: " + answerUrl + "/<SERVE_TOKEN>."
       : ".") }),
     el("div", { class: "url", text: answerUrl }),
-    el("p", { class: "muted", style: "margin-bottom:4px", text: "Build a matching ISO with scripts/build-iso.sh from the repo (downloads and verifies the PVE release, works on any jumpbox with docker or podman, and picks the header or URL form for you), or by hand:" }),
+    el("p", { class: "muted", style: "margin-bottom:4px", text: "Build a matching ISO from an ISO build on the left: it gives you a one-line command that runs build-iso.sh (downloads and verifies the PVE release, works on any jumpbox with docker or podman, and picks the header or URL form for you). Or by hand:" }),
     el("div", { class: "url", text: `proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http --url "${answerUrl}"${tokenArgs}` }),
     el("p", { class: "muted", text:
       "This one URL serves every answer. The installer posts its hardware details; the first answer (by match priority) " +
@@ -1221,6 +1232,7 @@ async function openRelay(name) {
   if (!r) return;
   S.relay = JSON.parse(JSON.stringify(r));
   S.answer = null;
+  S.profile = null;
   renderSidebar();
   renderRelay();
   showPane("relay-pane");
@@ -1317,10 +1329,66 @@ async function loadRelayLog() {
   ])]), tbody]));
 }
 
+// ISO builds
+
+async function openProfile(name) {
+  if (S.dirty && !confirm("Discard unsaved changes?")) return;
+  const p = S.isoProfiles.find((x) => x.name === name);
+  if (!p) return;
+  S.profile = JSON.parse(JSON.stringify(p));
+  S.answer = null; S.relay = null; S.dirty = false;
+  renderSidebar();
+  renderProfile();
+  showPane("profile-pane");
+}
+
+function renderProfile() {
+  const p = S.profile;
+  $("#profile-title").textContent = p.name;
+  const body = $("#profile-body");
+  body.innerHTML = "";
+  const field = (label, key, placeholder) => {
+    const input = el("input", { value: p[key] || "", placeholder });
+    input.addEventListener("input", () => { p[key] = input.value; stale.hidden = false; });
+    return el("label", { class: "field" }, [el("span", { text: label }), input]);
+  };
+  const notes = el("textarea", { value: p.notes || "", placeholder: "Which site or rack this is for, who to ask about the addresses, …" });
+  notes.addEventListener("input", () => { p.notes = notes.value; });
+  const stale = el("p", { class: "banner warn", hidden: true, text: "Unsaved changes: save to update the command." });
+  const cmd = el("div", { class: "url", text: p.command });
+
+  body.append(
+    el("div", { class: "card" }, [
+      el("h3", { text: "Build command" }),
+      el("p", { class: "muted", text: "Run this on a Linux machine with docker or podman (or Debian with proxmox-auto-install-assistant and xorriso). " +
+        "It downloads build-iso.sh from this Worker, then the Proxmox ISO, verifies its checksum, and writes the autopve ISO under ./iso. " +
+        "It asks for the SERVE_TOKEN on the terminal: the token is never part of the command." }),
+      cmd, stale,
+      el("div", { class: "rowbtns" }, [
+        el("button", { text: "Copy", onclick: async () => { await navigator.clipboard.writeText(p.command); toast("Copied."); } }),
+      ]),
+    ]),
+    el("div", { class: "card" }, [
+      el("h3", { text: "Proxmox release" }),
+      field("Version (empty means the newest release at build time)", "version", "9.2-1"),
+    ]),
+    el("div", { class: "card" }, [
+      el("h3", { text: "Network without DHCP" }),
+      el("p", { class: "muted", text: "Leave these empty on a network with DHCP. Without DHCP, the installer takes a free address from this range " +
+        "to fetch its answer, on the first cabled NIC where the gateway answers. Pick addresses nothing else uses. " +
+        "The installed system then uses the network settings in its answer (network.source = \"from-answer\")." }),
+      field("Bootstrap range", "boot_range", "192.168.100.240-192.168.100.249/24"),
+      field("Gateway", "boot_gateway", "192.168.100.1"),
+      field("DNS servers, comma-separated (empty means the gateway)", "boot_dns", "192.168.100.53"),
+    ]),
+    el("div", { class: "card" }, [el("h3", { text: "Notes" }), notes]),
+  );
+}
+
 // Files
 
 function openFiles() {
-  S.answer = null; S.relay = null;
+  S.answer = null; S.relay = null; S.profile = null;
   renderSidebar();
   const body = $("#files-body");
   body.innerHTML = "";
@@ -1414,7 +1482,7 @@ async function loadInstalls() {
 
 async function openInstalls() {
   if (S.dirty && !confirm("Discard unsaved changes?")) return;
-  S.answer = null; S.relay = null; S.dirty = false;
+  S.answer = null; S.relay = null; S.profile = null; S.dirty = false;
   renderSidebar();
   showPane("installs-pane");
   await loadInstalls();
@@ -1556,6 +1624,41 @@ function wireGlobalButtons() {
     const r = await api(`/relays/${encodeURIComponent(S.relay.name)}/test`, { method: "POST", body: {} });
     toast(r.result.ok ? `Target answered HTTP ${r.result.status}.` : `Delivery failed: ${r.result.error}`, r.result.ok ? "ok" : "bad", 10000);
     loadRelayLog();
+  };
+
+  const refreshProfiles = async () => { S.isoProfiles = (await api("/iso-profiles")).iso_profiles; };
+  $("#profile-add").onclick = async () => {
+    const name = await ask("New ISO build", "One per network, e.g. the site name. It gives you a one-line command that builds the ISO.", "", "Create");
+    if (!name) return;
+    try {
+      await api("/iso-profiles/" + encodeURIComponent(name), { method: "PUT", body: {} });
+      await refreshProfiles();
+      renderSidebar();
+      openProfile(name.trim());
+    } catch (err) { toast(err.message, "bad", 10000); }
+  };
+  $("#profile-delete").onclick = async () => {
+    if (!S.profile) return toast("Select an ISO build first.", "warn");
+    if (!confirm(`Delete ISO build "${S.profile.name}"?`)) return;
+    await api("/iso-profiles/" + encodeURIComponent(S.profile.name), { method: "DELETE" });
+    S.profile = null;
+    await refreshProfiles();
+    renderSidebar();
+    showPane("empty");
+  };
+  $("#profile-save").onclick = async () => {
+    if (!S.profile) return;
+    const p = S.profile;
+    try {
+      const r = await api("/iso-profiles/" + encodeURIComponent(p.name), {
+        method: "PUT",
+        body: { version: p.version, boot_range: p.boot_range, boot_gateway: p.boot_gateway, boot_dns: p.boot_dns, notes: p.notes },
+      });
+      S.profile = r.iso_profile;
+      await refreshProfiles();
+      renderSidebar(); renderProfile();
+      toast("Saved.");
+    } catch (err) { toast(err.message, "bad", 10000); }
   };
 
   $("#file-add").onclick = () => $("#file-input").click();

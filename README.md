@@ -408,6 +408,27 @@ proxmox-auto-install-assistant prepare-iso pve.iso --fetch-from http \
 # older assistants: --url https://autopve.example.com/answer/<SERVE_TOKEN>
 ```
 
+#### ISO builds in the configurator (one-liner)
+
+The configurator's **ISO builds** section saves the build settings for each network: an optional PVE
+version (empty means the newest at build time) and, for a network without DHCP, the bootstrap range,
+gateway and DNS (see [Networks without DHCP](#networks-without-dhcp)). Save one per site and it shows a
+command to copy, for example:
+
+```bash
+curl -fsSLo build-iso.sh https://autopve.example.com/build-iso.sh && bash build-iso.sh --url https://autopve.example.com \
+  --bootstrap-range 192.168.100.240-192.168.100.249/24 --bootstrap-gateway 192.168.100.2 --bootstrap-dns 192.168.100.118
+```
+
+- **Script source:** the Worker serves `/build-iso.sh` itself. It is the `scripts/build-iso.sh` this
+  deployment was built from, so the script always matches the Worker. The route is public: the
+  jumpbox has no Access session, and the file holds no secrets.
+- **Token:** never part of a profile or a command. The script asks for it on the terminal.
+- **Validation:** a profile is checked the way the script checks its `--bootstrap-*` options, so a
+  saved profile does not fail at build time.
+- **No pipe:** the command saves the script to a file and runs that, rather than piping it into
+  bash, so you can read it first.
+
 #### Running build-iso.sh without cloning the repo
 
 > **Don't pipe scripts from the internet into a shell, this one included, until you've read them.**
@@ -666,6 +687,7 @@ the configurator's origin.
 | `POST /hook/<relay>[/<token>]` | `SERVE_TOKEN` (required: body `token`, header, or path) | post-installation webhook → relay |
 | `POST /hook` | `SERVE_TOKEN` (required: body `token` or header) | post-installation webhook → Installs dashboard only |
 | `GET /files/<name>[?t=<token>]` | guards | first-boot scripts and downloads |
+| `GET /build-iso.sh` | none | the ISO build script, for the configurator's one-liner (no secrets) |
 | `GET /healthz` | none | liveness |
 
 ## Layout

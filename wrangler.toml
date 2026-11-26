@@ -11,6 +11,12 @@ directory = "./public"
 binding = "ASSETS"
 run_worker_first = true
 
+# scripts/build-iso.sh is bundled as text and served at /build-iso.sh.
+[[rules]]
+type = "Text"
+globs = ["**/*.sh"]
+fallthrough = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "autopve"
