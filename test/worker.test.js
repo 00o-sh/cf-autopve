@@ -273,6 +273,15 @@ test("ISO build profiles: validated like build-iso.sh, and give a one-liner with
       await assert.rejects(w.api("/iso-profiles/bad", "PUT", body), (err) => err.status === 400 && re.test(err.message), JSON.stringify(body));
     }
 
+    const tidy = await w.api("/iso-profiles/tidy", "PUT", {
+      boot_range: "10.0.0.240-10.0.0.249/24", boot_gateway: "10.0.0.1", boot_dns: " 10.0.0.53, 1.1.1.1,, ",
+    });
+    assert.equal(tidy.iso_profile.boot_dns, "10.0.0.53,1.1.1.1");
+    const started = Date.now();
+    await w.api("/iso-profiles/tidy", "PUT", { boot_range: "10.0.0.240-10.0.0.249/24", boot_gateway: "10.0.0.1", boot_dns: "10.0.0.53" + ",".repeat(200000) + "x" });
+    assert.ok(Date.now() - started < 2000, "a long run of commas is handled in linear time");
+    await w.api("/iso-profiles/tidy", "DELETE");
+
     const { iso_profiles } = await w.api("/iso-profiles");
     assert.deepEqual(iso_profiles.map((p) => p.name), ["Lab DHCP", "Yeled"]);
     assert.ok(!JSON.stringify(iso_profiles).includes("s3cret-token-value"));

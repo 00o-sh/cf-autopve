@@ -34,7 +34,8 @@ export function validateProfile(input: Partial<IsoProfile>): Pick<IsoProfile, "v
   const version = String(input.version ?? "").trim();
   const range = String(input.boot_range ?? "").trim();
   const gateway = String(input.boot_gateway ?? "").trim();
-  const dns = String(input.boot_dns ?? "").replace(/\s+/g, "").replace(/,+$/, "");
+  // Split rather than trim with a regex: /,+$/ is polynomial on a long run of commas.
+  const dns = String(input.boot_dns ?? "").slice(0, 500).replace(/\s+/g, "").split(",").filter(Boolean).join(",");
   const notes = String(input.notes ?? "").slice(0, 2000);
 
   if (version && !/^\d+\.\d+-\d+$/.test(version)) throw new ProfileError("Version must look like 9.2-1, or be empty for the newest release.");
