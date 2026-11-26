@@ -535,10 +535,18 @@ case "$RUNNER" in
       MOUNTS+=(-v "$(cd "$(dirname "$FIRST_BOOT")" && pwd)/$(basename "$FIRST_BOOT"):/first-boot:ro")
       FB_ARGS=(--on-first-boot /first-boot)
     fi
+    # The container's curl fetches the Proxmox keyring over HTTPS. Give it the host's
+    # trust store, so a root added on the host (e.g. a TLS-inspecting firewall) works there too.
+    CA_ENV=()
+    for b in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt; do
+      [ -r "$b" ] || continue
+      MOUNTS+=(-v "$b:/etc/ssl/autopve-host-ca.crt:ro"); CA_ENV=(-e CURL_CA_BUNDLE=/etc/ssl/autopve-host-ca.crt)
+      break
+    done
     HOST_UID="$(id -u)" HOST_GID="$(id -g)"
     export HOST_UID HOST_GID
     # shellcheck disable=SC2016  # expands inside the container, not here
-    "$RUNNER" run --rm -e HOST_UID -e HOST_GID -e AUTOPVE_ANSWER_URL -e AUTOPVE_BASE_ANSWER_URL -e AUTOPVE_AUTH_TOKEN -e PICK_FETCH -e AUTOPVE_SAFE_COPY \
+    "$RUNNER" run --rm ${CA_ENV[@]+"${CA_ENV[@]}"} -e HOST_UID -e HOST_GID -e AUTOPVE_ANSWER_URL -e AUTOPVE_BASE_ANSWER_URL -e AUTOPVE_AUTH_TOKEN -e PICK_FETCH -e AUTOPVE_SAFE_COPY \
       -e INJECT_BOOTSTRAP -e AUTOPVE_BOOTSTRAP_CONF -e AUTOPVE_HOOK_TEXT "${MOUNTS[@]}" "docker.io/library/debian:$SUITE" bash -euo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq >/dev/null

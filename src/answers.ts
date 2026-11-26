@@ -8,7 +8,7 @@
  */
 
 import type { Env } from "./env";
-import { bool } from "./env";
+import { bool, trimTrailing } from "./env";
 import { PublicError } from "./errors";
 import { encryptString, decryptString, isEncrypted } from "./crypto";
 import { isSecretKey, SECTION_ORDER, DEFAULT_ANSWER_DOC } from "./schema";
@@ -570,6 +570,30 @@ const present = (v: unknown) => v !== undefined && v !== null && v !== "";
  * while Default says `from-dhcp`. Returned as messages, not thrown: the
  * answer still saves, and the operator sees why the install would fail.
  */
+/**
+ * When the answer's post-installation webhook points at this Worker's /hook
+ * and sets no auth-token, fill in the SERVE_TOKEN so the callback is accepted
+ * (/hook requires it). The caller already presented that token to get the
+ * answer, so handing it back reveals nothing new. Only for installers that
+ * report PVE 9.2 or newer: older ones reject auth-token as an unknown field.
+ */
+export function fillHookToken(doc: AnswerDoc, serveToken: string | undefined, origin: string, systemInfo: unknown): { doc: AnswerDoc; filled: boolean } {
+  const hook = doc["post-installation-webhook"];
+  if (!serveToken || !hook || typeof hook !== "object" || typeof hook.url !== "string" || hook["auth-token"]) return { doc, filled: false };
+  let target: URL;
+  try {
+    target = new URL(hook.url);
+  } catch {
+    return { doc, filled: false };
+  }
+  const path = trimTrailing(target.pathname, "/");
+  if (target.origin !== origin || (path !== "/hook" && !path.startsWith("/hook/"))) return { doc, filled: false };
+  const release = (systemInfo as any)?.iso?.release;
+  const m = typeof release === "string" ? release.match(/^(\d+)\.(\d+)/) : null;
+  if (!m || Number(m[1]) * 1000 + Number(m[2]) < 9002) return { doc, filled: false };
+  return { doc: { ...doc, "post-installation-webhook": { ...hook, "auth-token": serveToken } }, filled: true };
+}
+
 export function lintMerged(doc: AnswerDoc): string[] {
   const out: string[] = [];
   const g = (doc.global ?? {}) as Record<string, unknown>;

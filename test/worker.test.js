@@ -168,6 +168,33 @@ test("JSON for installers that ask for it, TOML otherwise", async () => {
   } finally { await w.close(); }
 });
 
+test("the Worker fills in the webhook auth-token for its own /hook on PVE 9.2+ installers", async () => {
+  const w = await start({ DEV_ALLOW_INSECURE_UI: "true", SERVE_TOKEN: TOKEN });
+  try {
+    await w.api("/bootstrap");
+    const base = { ...NODE1, global: { ...NODE1.global, "root-password": undefined }, must_contain: [] };
+    const save = (url) => w.api("/answers/Default", "PUT", { doc: { ...base, "post-installation-webhook": { url } }, settings: { serve_mode: "always" } });
+    const serve = async (iso, headers = {}) => (await w.installer({ ...SYSINFO, ...(iso ? { iso } : {}) }, { ...BEARER, ...headers })).text();
+
+    await save("https://localhost/hook");
+    const filled = await serve({ release: "9.2", isorelease: "1" });
+    assert.match(filled, new RegExp(`auth-token = "${TOKEN}"`));
+    const asJson = JSON.parse(await serve({ release: "9.3", isorelease: "1" }, { Accept: "application/json" }));
+    assert.equal(asJson["post-installation-webhook"]["auth-token"], TOKEN);
+    assert.doesNotMatch(await serve({ release: "9.1", isorelease: "2" }), /auth-token/, "9.1 rejects the unknown key");
+    assert.doesNotMatch(await serve(null), /auth-token/, "no release reported: leave it out");
+
+    await save("https://localhost/hook/ansible");
+    assert.match(await serve({ release: "9.2", isorelease: "1" }), /auth-token/, "relay hooks too");
+    await save("https://automation.example.com/hook");
+    assert.doesNotMatch(await serve({ release: "9.2", isorelease: "1" }), /auth-token/, "another receiver never gets our token");
+
+    const rows = (await w.db.prepare("SELECT detail, response FROM history WHERE kind = 'answer' AND outcome = 'served'").all()).results;
+    assert.ok(rows.some((r) => r.detail.includes("webhook auth-token filled in")));
+    assert.ok(rows.every((r) => !r.response.includes(TOKEN)), "history keeps the redacted copy");
+  } finally { await w.close(); }
+});
+
 test("each client IP is rate limited", async () => {
   const w = await start({ DEV_ALLOW_INSECURE_UI: "true", RATE_LIMIT_PER_MIN: "2", SERVE_TOKEN: TOKEN });
   try {
@@ -256,6 +283,9 @@ test("ISO build profiles: validated like build-iso.sh, and give a one-liner with
     assert.equal(yeled.iso_profile.command,
       "curl -fsSLo build-iso.sh https://localhost/build-iso.sh && bash build-iso.sh --url https://localhost " +
       "--bootstrap-range 192.168.100.240-192.168.100.249/24 --bootstrap-gateway 192.168.100.2 --bootstrap-dns 192.168.100.118");
+
+    assert.equal(yeled.iso_profile.command_powershell, `wsl -e bash -c "${yeled.iso_profile.command}"`);
+    assert.doesNotMatch(yeled.iso_profile.command, /["$`]/, "nothing PowerShell would expand inside its double quotes");
 
     const dhcp = await w.api("/iso-profiles/Lab DHCP", "PUT", { version: "9.2-1" });
     assert.equal(dhcp.iso_profile.command, "curl -fsSLo build-iso.sh https://localhost/build-iso.sh && bash build-iso.sh --url https://localhost --version 9.2-1");

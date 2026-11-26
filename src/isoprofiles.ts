@@ -75,6 +75,16 @@ export function buildCommand(origin: string, profile: Pick<IsoProfile, "version"
   return `curl -fsSLo build-iso.sh ${origin}/build-iso.sh && bash build-iso.sh ${args.join(" ")}`;
 }
 
+/**
+ * The same command for Windows PowerShell: it runs the bash one-liner in WSL,
+ * which starts in PowerShell's current folder, so the ISO lands in .\iso there.
+ * Every value in the bash command is validated (IPv4, version, the Worker's
+ * origin), so it holds no ", $ or ` that PowerShell would act on.
+ */
+export function buildCommandPowerShell(origin: string, profile: Pick<IsoProfile, "version" | "boot_range" | "boot_gateway" | "boot_dns">): string {
+  return `wsl -e bash -c "${buildCommand(origin, profile)}"`;
+}
+
 export async function listProfiles(env: Env): Promise<IsoProfile[]> {
   const res = await env.DB.prepare("SELECT * FROM iso_profiles ORDER BY name").all<IsoProfile>();
   return res.results ?? [];

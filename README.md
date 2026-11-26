@@ -152,14 +152,17 @@ Then put **Cloudflare Access** in front of the configurator:
 1. Zero Trust → Access → Applications → *Add a self-hosted application* for the configurator.
    Domain: your Worker's hostname, **path empty**. Policy: **Allow**, include your email or group
    (add device posture etc. as you like).
-2. Add a **second** self-hosted application for the installer endpoints, with three destinations on the
-   same hostname: paths `answer`, `hook` and `files` (each covers its sub-paths). Policy: **Bypass**,
-   include your lab's public IP range (or Everyone if installs can come from anywhere).
+2. Add a **second** self-hosted application for the installer endpoints, with four destinations on the
+   same hostname: paths `answer`, `hook` and `files` (each covers its sub-paths), and `build-iso.sh`
+   (the ISO build script the configurator's one-liner downloads; it holds no secrets). Policy:
+   **Bypass**, include your lab's public IP range (or Everyone if installs can come from anywhere).
+   Without `build-iso.sh` in it, the one-liner downloads the Access sign-in page and bash fails with
+   ``syntax error near unexpected token `<'``.
 
    The second app is required: Access sits in front of the Worker, so with only the first app the
    installer gets a login page instead of its answer. It has to be a separate app because Access
    policies apply to every path in an app. Access picks the most specific app by path first, so these
-   three paths land on the Bypass app and everything else on the login app. The Worker's own guards
+   paths land on the Bypass app and everything else on the login app. The Worker's own guards
    (arming, allowlists, token, rate limit) still apply behind the bypass.
 3. Copy the **configurator** app's **Application Audience (AUD) tag** into `ACCESS_AUD` and your team
    domain into `ACCESS_TEAM_DOMAIN` in `wrangler.toml`, then redeploy. The installer app's AUD is not
@@ -420,6 +423,26 @@ curl -fsSLo build-iso.sh https://autopve.example.com/build-iso.sh && bash build-
   --bootstrap-range 192.168.100.240-192.168.100.249/24 --bootstrap-gateway 192.168.100.2 --bootstrap-dns 192.168.100.118
 ```
 
+On Windows, the profile also shows a PowerShell form that runs the same command in WSL:
+
+```powershell
+cd C:\iso   # the ISO is written to .\iso here
+wsl -e bash -c "curl -fsSLo build-iso.sh https://autopve.example.com/build-iso.sh && bash build-iso.sh --url https://autopve.example.com ..."
+```
+
+The WSL distro needs docker (Docker Desktop with WSL integration on) or podman, like any other build
+machine. The script already turns on safe copy under WSL.
+
+If `curl` in WSL fails with `unable to get local issuer certificate`, an antivirus or firewall is
+inspecting HTTPS with a root that Windows trusts but WSL does not. The profile's **Copy certificate sync
+script** button copies a PowerShell script that does three things:
+- exports every valid root from the Windows machine and user Trusted Root stores;
+- installs them in WSL under `/usr/local/share/ca-certificates/windows`;
+- runs `update-ca-certificates`.
+
+The build container then uses the same trust store, because `build-iso.sh` passes the host's CA bundle
+into it. Re-run the script when that root changes.
+
 - **Script source:** the Worker serves `/build-iso.sh` itself. It is the `scripts/build-iso.sh` this
   deployment was built from, so the script always matches the Worker. The route is public: the
   jumpbox has no Access session, and the file holds no secrets.
@@ -545,15 +568,19 @@ so without a token anyone who guessed a relay name could trigger it with a paylo
 signed with your HMAC secret. While no token is configured, every `/hook` call is refused with
 `403 relays are disabled until a SERVE_TOKEN is configured`.
 
-Create a relay, then set it in the answer's **Post Install** section. Set `auth-token` to the
-`SERVE_TOKEN` (PVE 9.2+). The installer sends it as a top-level `token` field in the JSON body, so it
-stays out of the URL:
+Create a relay, then set it as the `url` in the answer's **Post Install** section:
 
 ```toml
 [post-installation-webhook]
 url = "https://autopve.example.com/hook/deploy"
-auth-token = "<SERVE_TOKEN>"
 ```
+
+You don't need to set `auth-token`. When the url is this Worker's `/hook` and `auth-token` is
+empty, the Worker fills in the `SERVE_TOKEN` as it serves the answer. The installer then sends it as a
+top-level `token` field in the JSON body, so it stays out of the URL. This applies only to installers
+that report PVE 9.2 or newer in their system information (`iso.release`): older installers reject
+`auth-token` as an unknown field. The installer had to present the same token to fetch the answer, so
+this reveals nothing new. History keeps the redacted answer and notes "webhook auth-token filled in".
 
 The Worker removes that `token` field before relaying the payload, so your automation never sees the
 serve token. A different `auth-token` value is taken to be the receiver's own and is passed through,
@@ -628,10 +655,10 @@ records the result:
 ```toml
 [post-installation-webhook]
 url = "https://autopve.example.com/hook"
-auth-token = "<SERVE_TOKEN>"
 ```
 
-A relay URL (`/hook/<name>`) records it too, before relaying. Both need the `SERVE_TOKEN`.
+A relay URL (`/hook/<name>`) records it too, before relaying. Both need the `SERVE_TOKEN`, which the
+Worker fills in as `auth-token` for PVE 9.2+ installers (see [Post-installation webhook relay](#post-installation-webhook-relay)).
 
 Machines are identified by DMI system UUID, then serial, then lowest MAC, skipping firmware filler
 like `To Be Filled By O.E.M.` or all-zero UUIDs, so the answer request and the webhook land on the same
